@@ -1,0 +1,495 @@
+// ── FxOrbit simulated market engine ──────────────────────────────────────────
+// Generates realistic candle history per pair and streams live ticks via a
+// tiny pub/sub. Data is simulated client-side; anchors sit near real market
+// levels so the terminal feels alive without an API key.
+
+import { UNIVERSE, DEFAULT_ENABLED, loadSettings, saveSettings, loadStrategies } from './settings';
+
+export const TIMEFRAMES = ['1m', '5m', '15m', '1H', '4H', '1D'];
+
+const TF_MINUTES = { '1m': 1, '5m': 5, '15m': 15, '1H': 60, '4H': 240, '1D': 1440 };
+
+const CCY_COLORS = {
+  EUR: ['#3b82f6', '#6366f1'], USD: ['#10b981', '#0d9488'], GBP: ['#8b5cf6', '#d946ef'],
+  JPY: ['#f43f5e', '#fb7185'], CHF: ['#ef4444', '#f59e0b'], AUD: ['#f59e0b', '#f97316'],
+  NZD: ['#eab308', '#ca8a04'], CAD: ['#dc2626', '#f97316'], XAU: ['#fbbf24', '#d97706'],
+  XAG: ['#94a3b8', '#64748b'],
+};
+export const ccyGradient = (code) => CCY_COLORS[code] ?? ['#64748b', '#475569'];
+
+export const SESSIONS = [
+  { name: 'Sydney',    utc: [21, 6] },
+  { name: 'Tokyo',     utc: [0, 9]  },
+  { name: 'London',    utc: [8, 17] },
+  { name: 'New York',  utc: [13, 22] },
+];
+
+export const sessionOpen = (s, hourUtc) => {
+  const [a, b] = s.utc;
+  return a < b ? hourUtc >= a && hourUtc < b : hourUtc >= a || hourUtc < b;
+};
+
+export const fmt = (v, d) =>
+  v.toLocaleString('en-US', { minimumFractionDigits: d, maximumFractionDigits: d });
+
+function hashStr(str) {
+  let h = 2166136261;
+  for (let i = 0; i < str.length; i++) {
+    h ^= str.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return h >>> 0;
+}
+
+function seededRand(seed) {
+  let a = seed >>> 0;
+  return () => {
+    a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+function genHistory(def, tfMin, anchor) {
+  const rng = seededRand(hashStr(`${def.symbol}:${tfMin}`));
+  const count = 300;
+  const step = tfMin * 60;
+  const end = Math.floor(Date.now() / 1000 / step) * step;
+  const volC = def.vol * Math.sqrt(tfMin);
+  const candles = [];
+  let price = anchor * (1 + (rng() - 0.5) * 0.012);
+  for (let i = count - 1; i >= 0; i--) {
+    const open = price;
+    const close = open * (1 + (rng() - 0.5) * 2 * volC);
+    const high = Math.max(open, close) * (1 + rng() * volC * 0.7);
+    const low = Math.min(open, close) * (1 - rng() * volC * 0.7);
+    const volume = Math.round(90 + rng() * 240 + (Math.abs(close - open) / volC) * 180);
+    candles.push({ time: end - i * step, open, high, low, close, volume });
+    price = close;
+  }
+  const k = anchor / candles[candles.length - 1].close;
+  return candles.map((c) => ({
+    ...c,
+    open: c.open * k, high: c.high * k, low: c.low * k, close: c.close * k,
+  }));
+}
+
+function calcRsi(closes, period = 14) {
+  if (closes.length < period + 1) return 50;
+  let gains = 0, losses = 0;
+  for (let i = closes.length - period; i < closes.length; i++) {
+    const d = closes[i] - closes[i - 1];
+    if (d >= 0) gains += d; else losses -= d;
+  }
+  if (losses === 0) return 100;
+  if (gains === 0) return 0;
+  return 100 - 100 / (1 + gains / losses);
+}
+
+function emaSeries(closes, period) {
+  if (!closes.length) return [];
+  const k = 2 / (period + 1);
+  const out = [closes[0]];
+  for (let i = 1; i < closes.length; i++) out.push(closes[i] * k + out[i - 1] * (1 - k));
+  return out;
+}
+
+class MarketEngine {
+  constructor() {
+    this.listeners = new Set();
+    this.timer = null;
+    this.tickCount = 0;
+    this.states = new Map();
+    this.defs = new Map(UNIVERSE.map((d) => [d.symbol, d]));
+    this.trades = [];
+    this.tradeSeq = 0;
+    this.strategyOpen = new Map(); // `${strategyId}:${symbol}` -> tradeId
+    this.autoOpen = new Map();     // symbol -> tradeId
+    this.strategies = loadStrategies();
+    this.started = false;
+  }
+
+  createState(def) {
+    const rng = seededRand(hashStr(def.symbol + '@day'));
+    const dayOpen = def.price * (1 + (rng() - 0.5) * 0.009);
+    const state = {
+      ...def,
+      mid: def.price,
+      dir: 0,
+      dayOpen,
+      dayHigh: Math.max(dayOpen, def.price) * 1.0004,
+      dayLow: Math.min(dayOpen, def.price) * 0.9996,
+      spark: [],
+      candlesByTf: new Map(),
+      rsi: 50, momentum: 0, score: 0, signal: 'NEUTRAL', confidence: 54,
+      detailTick: -1, detail: null,
+    };
+    const m1 = genHistory(def, 1, def.price);
+    state.candlesByTf.set('1m', m1);
+    state.liveCandle = m1[m1.length - 1];
+    state.mid = state.liveCandle.close;
+    state.spark = m1.slice(-90).map((c) => c.close);
+    this.derive(state);
+    return state;
+  }
+
+  start() {
+    if (this.started) return;
+    this.started = true;
+    const settings = loadSettings();
+    for (const sym of settings.pairs) {
+      const def = this.defs.get(sym);
+      if (def && !this.states.has(sym)) this.states.set(sym, this.createState(def));
+    }
+    this.seedTrades();
+    if (!this.timer) this.timer = setInterval(() => this.tick(), 900);
+  }
+
+  applyUniverse(symbols) {
+    const next = new Set(symbols);
+    for (const sym of [...this.states.keys()]) {
+      if (!next.has(sym)) this.states.delete(sym);
+    }
+    for (const sym of next) {
+      const def = this.defs.get(sym);
+      if (def && !this.states.has(sym)) this.states.set(sym, this.createState(def));
+    }
+    saveSettings({ pairs: [...next] });
+    this.emit();
+  }
+
+  derive(s) {
+    const c = s.liveCandle;
+    s.bid = c.close - (s.spread * s.pip) / 2;
+    s.ask = c.close + (s.spread * s.pip) / 2;
+    s.change = c.close - s.dayOpen;
+    s.changePct = (s.change / s.dayOpen) * 100;
+  }
+
+  tick() {
+    this.tickCount += 1;
+    const roll = this.tickCount % 8 === 0;
+    for (const s of this.states.values()) {
+      const stepVol = s.vol * 0.12;
+      const prev = s.liveCandle.close;
+      const next = Math.max(prev * (1 + (Math.random() - 0.5) * 2 * stepVol), s.pip * 10);
+      s.dir = next > prev ? 1 : next < prev ? -1 : 0;
+      for (const [tf, arr] of s.candlesByTf) {
+        const last = arr[arr.length - 1];
+        last.close = next;
+        if (next > last.high) last.high = next;
+        if (next < last.low) last.low = next;
+        last.volume += Math.round(2 + Math.random() * 14);
+        if (roll) {
+          arr.push({
+            time: last.time + TF_MINUTES[tf] * 60,
+            open: last.close,
+            high: last.close * 1.00002,
+            low: last.close * 0.99998,
+            close: last.close,
+            volume: Math.round(60 + Math.random() * 140),
+          });
+          if (arr.length > 320) arr.shift();
+        }
+      }
+      s.mid = next;
+      s.dayHigh = Math.max(s.dayHigh, next);
+      s.dayLow = Math.min(s.dayLow, next);
+      s.spark.push(next);
+      if (s.spark.length > 90) s.spark.shift();
+
+      const m1 = s.candlesByTf.get('1m');
+      s.liveCandle = m1[m1.length - 1];
+      const closes = m1.map((c) => c.close);
+      s.rsi = calcRsi(closes);
+      const back = closes[closes.length - 11] ?? closes[0];
+      s.momentum = ((next - back) / back) * 100;
+
+      const score =
+        (s.rsi > 65 ? 2 : s.rsi > 55 ? 1 : 0) +
+        (s.rsi < 35 ? -2 : s.rsi < 45 ? -1 : 0) +
+        (s.momentum > 0.05 ? 2 : s.momentum > 0.015 ? 1 : 0) +
+        (s.momentum < -0.05 ? -2 : s.momentum < -0.015 ? -1 : 0);
+      s.score = score;
+      s.signal =
+        score >= 3 ? 'STRONG BUY' : score >= 1 ? 'BUY'
+        : score <= -3 ? 'STRONG SELL' : score <= -1 ? 'SELL' : 'NEUTRAL';
+      s.confidence = Math.min(97, 54 + Math.abs(score) * 10);
+      this.derive(s);
+
+      this.checkTradeExits(s);
+      this.maybeAutoTrade(s);
+      if (roll) this.checkStrategies(s);
+    }
+    this.emit();
+  }
+
+  emit() {
+    const snap = [...this.states.values()];
+    this.listeners.forEach((fn) => fn(snap, this.tickCount));
+  }
+
+  subscribe(fn) {
+    this.listeners.add(fn);
+    return () => this.listeners.delete(fn);
+  }
+
+  getSnapshot() {
+    return [...this.states.values()];
+  }
+
+  getState(symbol) {
+    return this.states.get(symbol);
+  }
+
+  getCandles(symbol, tf) {
+    const s = this.states.get(symbol);
+    if (!s) return [];
+    if (!s.candlesByTf.has(tf)) {
+      s.candlesByTf.set(tf, genHistory(s, TF_MINUTES[tf] ?? 1, s.mid));
+    }
+    return s.candlesByTf.get(tf);
+  }
+
+  // ── Signal detail (entry / SL / TP / reasons) ──────────────────────────────
+  getDetail(s) {
+    if (s.detailTick === this.tickCount && s.detail) return s.detail;
+    s.detailTick = this.tickCount;
+
+    const c15 = this.getCandles(s.symbol, '15m');
+    const atr = (() => {
+      if (c15.length < 15) return s.mid * s.vol * 4;
+      let sum = 0;
+      for (let i = c15.length - 14; i < c15.length; i++) {
+        const c = c15[i], p = c15[i - 1];
+        sum += Math.max(c.high - c.low, Math.abs(c.high - p.close), Math.abs(c.low - p.close));
+      }
+      return sum / 14;
+    })();
+
+    const side = s.score >= 1 ? 'LONG' : s.score <= -1 ? 'SHORT' : 'WAIT';
+    const entry = s.mid;
+    const slDist = 1.4 * atr;
+    const tpDist = 2.45 * atr;
+    const sl = side === 'SHORT' ? entry + slDist : entry - slDist;
+    const tp = side === 'SHORT' ? entry - tpDist : entry + tpDist;
+    const slPips = slDist / s.pip;
+    const tpPips = tpDist / s.pip;
+
+    const reasons = [];
+    if (s.rsi >= 65) reasons.push(`RSI ${s.rsi.toFixed(0)} overbought — momentum stretched`);
+    else if (s.rsi >= 55) reasons.push(`RSI ${s.rsi.toFixed(0)} bullish momentum`);
+    else if (s.rsi <= 35) reasons.push(`RSI ${s.rsi.toFixed(0)} oversold — downside pressure`);
+    else if (s.rsi <= 45) reasons.push(`RSI ${s.rsi.toFixed(0)} bearish momentum`);
+    if (s.momentum >= 0.015) reasons.push(`1m momentum +${s.momentum.toFixed(3)}% rising`);
+    else if (s.momentum <= -0.015) reasons.push(`1m momentum ${s.momentum.toFixed(3)}% falling`);
+    const hour = new Date().getUTCHours();
+    const active = SESSIONS.filter((x) => sessionOpen(x, hour)).map((x) => x.name).join(' + ');
+    if (active) reasons.push(`${active} session liquidity`);
+    reasons.push(`Spread ${s.spread.toFixed(1)} pips — ${s.spread < 2 ? 'tight' : 'wide'} cost`);
+
+    s.detail = { side, entry, sl, tp, rr: tpPips / Math.max(slPips, 0.01), slPips, tpPips, atr, reasons };
+    return s.detail;
+  }
+
+  // ── Trade manager ──────────────────────────────────────────────────────────
+  seedTrades() {
+    const rng = seededRand(0xF0E1);
+    const syms = [...this.states.keys()];
+    if (!syms.length) return;
+    const sources = ['Manual', 'AI Signal', 'Strategy'];
+    const now = Date.now();
+    for (let i = 0; i < 45; i++) {
+      const sym = syms[Math.floor(rng() * syms.length)];
+      const s = this.states.get(sym);
+      const side = rng() > 0.5 ? 'BUY' : 'SELL';
+      const ageH = 4 + rng() * 230;
+      const entry = s.mid * (1 + (rng() - 0.5) * 0.012);
+      const atr = s.mid * s.vol * 60;
+      const slDist = atr * (0.9 + rng() * 0.8);
+      const win = rng() < 0.58;
+      const exitDist = win ? slDist * (0.6 + rng() * 1.6) : slDist * (0.35 + rng() * 0.6);
+      const dir = side === 'BUY' ? 1 : -1;
+      const exit = win ? entry + dir * exitDist : entry - dir * exitDist;
+      const openedAt = now - ageH * 3600 * 1000;
+      const closedAt = openedAt + (0.4 + rng() * 0.55) * ageH * 3600 * 1000;
+      const pips = (exit - entry) * dir / s.pip;
+      const trade = {
+        id: `S-${String(++this.tradeSeq).padStart(3, '0')}`,
+        symbol: sym, side, lots: 0.1, entry, sl: entry - dir * slDist, tp: entry + dir * slDist * 1.75,
+        openedAt, openTick: 0,
+        source: sources[Math.floor(rng() * sources.length)],
+        strategyId: null,
+        status: 'closed', exit, closedAt,
+        pnl: pips * (0.1 / 0.1),
+        pips: +pips.toFixed(1),
+        exitReason: win ? (rng() > 0.35 ? 'TP Hit' : 'Manual Close') : (rng() > 0.5 ? 'SL Hit' : 'Manual Close'),
+      };
+      this.trades.push(trade);
+    }
+    for (let i = 0; i < 3; i++) {
+      const sym = syms[Math.floor(rng() * syms.length)];
+      const s = this.states.get(sym);
+      const side = rng() > 0.5 ? 'BUY' : 'SELL';
+      const dir = side === 'BUY' ? 1 : -1;
+      const entry = s.mid * (1 + (rng() - 0.5) * 0.002);
+      const atr = s.mid * s.vol * 60;
+      this.trades.push({
+        id: `S-${String(++this.tradeSeq).padStart(3, '0')}`,
+        symbol: sym, side, lots: 0.1, entry,
+        sl: entry - dir * atr, tp: entry + dir * atr * 1.75,
+        openedAt: now - rng() * 2 * 3600 * 1000, openTick: this.tickCount,
+        source: 'Manual', strategyId: null, status: 'open',
+      });
+    }
+    this.trades.sort((a, b) => (b.closedAt ?? b.openedAt) - (a.closedAt ?? a.openedAt));
+  }
+
+  openTrade({ symbol, side, source = 'Manual', strategyId = null, slPips, tpPips }) {
+    const s = this.states.get(symbol);
+    if (!s) return null;
+    const dir = side === 'BUY' ? 1 : -1;
+    const entry = s.mid;
+    const sl = entry - dir * slPips * s.pip;
+    const tp = entry + dir * tpPips * s.pip;
+    const trade = {
+      id: `T-${String(++this.tradeSeq).padStart(3, '0')}`,
+      symbol, side, lots: 0.1, entry, sl, tp,
+      openedAt: Date.now(), openTick: this.tickCount,
+      source, strategyId, status: 'open',
+    };
+    this.trades.unshift(trade);
+    return trade;
+  }
+
+  closeTrade(t, exit, reason) {
+    if (t.status !== 'open') return;
+    const s = this.states.get(t.symbol);
+    t.status = 'closed';
+    t.exit = exit;
+    t.closedAt = Date.now();
+    const dir = t.side === 'BUY' ? 1 : -1;
+    t.pips = +(((exit - t.entry) * dir) / (s ? s.pip : 0.0001)).toFixed(1);
+    t.pnl = +(t.pips * (t.lots / 0.1)).toFixed(2);
+    t.exitReason = reason;
+  }
+
+  checkTradeExits(s) {
+    for (const t of this.trades) {
+      if (t.status !== 'open' || t.symbol !== s.symbol) continue;
+      const dir = t.side === 'BUY' ? 1 : -1;
+      if (dir > 0 && s.mid >= t.tp) this.closeTrade(t, t.tp, 'TP Hit');
+      else if (dir > 0 && s.mid <= t.sl) this.closeTrade(t, t.sl, 'SL Hit');
+      else if (dir < 0 && s.mid <= t.tp) this.closeTrade(t, t.tp, 'TP Hit');
+      else if (dir < 0 && s.mid >= t.sl) this.closeTrade(t, t.sl, 'SL Hit');
+      else if (this.tickCount - t.openTick > 240) this.closeTrade(t, s.mid, 'Time Stop');
+    }
+  }
+
+  maybeAutoTrade(s) {
+    const settings = loadSettings();
+    if (!settings.autoTrade.includes(s.symbol)) return;
+    if (this.autoOpen.has(s.symbol)) {
+      const t = this.trades.find((x) => x.id === this.autoOpen.get(s.symbol));
+      if (!t || t.status !== 'open') this.autoOpen.delete(s.symbol);
+      else return;
+    }
+    if (Math.abs(s.score) < 3) return;
+    const d = this.getDetail(s);
+    const side = s.score > 0 ? 'BUY' : 'SELL';
+    const t = this.openTrade({
+      symbol: s.symbol, side, source: 'AI Signal',
+      slPips: Math.max(d.slPips, 3), tpPips: Math.max(d.tpPips, 5),
+    });
+    if (t) this.autoOpen.set(s.symbol, t.id);
+  }
+
+  setAutoTrade(symbol, on) {
+    const settings = loadSettings();
+    const set = new Set(settings.autoTrade);
+    if (on) set.add(symbol); else set.delete(symbol);
+    saveSettings({ autoTrade: [...set] });
+  }
+
+  // ── Custom strategy execution ──────────────────────────────────────────────
+  syncStrategies(list) {
+    this.strategies = list;
+    const ids = new Set(list.filter((x) => x.active).map((x) => x.id));
+    for (const [key, tradeId] of [...this.strategyOpen]) {
+      if (!ids.has(key.split(':')[0])) this.strategyOpen.delete(key);
+      else {
+        const t = this.trades.find((x) => x.id === tradeId);
+        if (!t || t.status !== 'open') this.strategyOpen.delete(key);
+      }
+    }
+  }
+
+  checkStrategies(s) {
+    if (!this.strategies.length) return;
+    const m1 = s.candlesByTf.get('1m');
+    const closes = m1.map((c) => c.close);
+    if (closes.length < 30) return;
+    const hour = new Date().getUTCHours();
+    for (const st of this.strategies) {
+      if (!st.active) continue;
+      if (st.pair !== s.symbol) continue;
+      if (this.strategyOpen.has(`${st.id}:${s.symbol}`)) continue;
+
+      const fast = emaSeries(closes, st.fastEma ?? 9);
+      const slow = emaSeries(closes, st.slowEma ?? 21);
+      const f0 = fast[fast.length - 2], f1 = fast[fast.length - 1];
+      const w0 = slow[slow.length - 2], w1 = slow[slow.length - 1];
+      const crossUp = f0 <= w0 && f1 > w1;
+      const crossDown = f0 >= w0 && f1 < w1;
+      const wantLong = st.direction !== 'short';
+      const wantShort = st.direction !== 'long';
+
+      let side = null;
+      if (crossUp && wantLong) side = 'BUY';
+      else if (crossDown && wantShort) side = 'SELL';
+      if (!side) continue;
+
+      if (st.rsiFilter) {
+        const rsi = calcRsi(closes);
+        if (side === 'BUY' && rsi < (st.rsiMin ?? 40)) continue;
+        if (side === 'SELL' && rsi > (st.rsiMax ?? 60)) continue;
+      }
+      void hour;
+      const t = this.openTrade({
+        symbol: s.symbol, side, source: 'Strategy', strategyId: st.id,
+        slPips: st.slPips ?? 12, tpPips: st.tpPips ?? 24,
+      });
+      if (t) this.strategyOpen.set(`${st.id}:${s.symbol}`, t.id);
+    }
+  }
+
+  getTrades() {
+    return this.trades;
+  }
+
+  tradeStats() {
+    const closed = this.trades.filter((t) => t.status === 'closed');
+    const open = this.trades.filter((t) => t.status === 'open');
+    const netPnl = closed.reduce((a, t) => a + t.pnl, 0);
+    const wins = closed.filter((t) => t.pnl > 0);
+    const losses = closed.filter((t) => t.pnl <= 0);
+    const grossWin = wins.reduce((a, t) => a + t.pnl, 0);
+    const grossLoss = Math.abs(losses.reduce((a, t) => a + t.pnl, 0));
+    return {
+      netPnl: +netPnl.toFixed(2),
+      winRate: closed.length ? Math.round((wins.length / closed.length) * 100) : 0,
+      closedCount: closed.length,
+      openCount: open.length,
+      profitFactor: grossLoss > 0 ? +(grossWin / grossLoss).toFixed(2) : grossWin > 0 ? 99 : 0,
+    };
+  }
+}
+
+export const engine = new MarketEngine();
+export const volatilityPips = (s) => {
+  const m1 = s.candlesByTf.get('1m');
+  const tail = m1.slice(-20);
+  if (!tail.length) return 0;
+  return tail.reduce((acc, c) => acc + (c.high - c.low) / s.pip, 0) / tail.length;
+};
