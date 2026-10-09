@@ -1,8 +1,29 @@
-import { useMemo, useState } from 'react';
-import { Brain, Save, Trash2, RefreshCw, Plus, ShieldCheck, Target, ListChecks } from 'lucide-react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import {
+  Brain, RefreshCw, ShieldCheck, FileText, Upload, Sparkles, X, AlertTriangle,
+} from 'lucide-react';
 import { engine, fmt } from '../data/marketEngine';
-import { UNIVERSE, loadStrategies, saveStrategies, loadSettings } from '../data/settings';
-import { Badges } from '../components/shared';
+import { UNIVERSE, loadSettings, saveSettings } from '../data/settings';
+import PriceChart from '../components/PriceChart';
+import { downscale, parseJsonLoose, aiReady, aiAuthHeaders, aiSupportsVision } from '../utils/ai';
+
+const SYSTEM_PROMPT = [
+  'You are FxOrbit, a senior quantitative strategy analyst inside a trading terminal.',
+  'Analyze the trading strategy the user describes (text plus any attached screenshots) and respond with ONLY a JSON object (no markdown) shaped:',
+  '{"title":"short strategy name","pair":"best instrument symbol for it, e.g. XAU/USD",',
+  '"analysis":["paragraph 1","paragraph 2"],"entryRules":["rule","rule","rule"],',
+  '"riskRules":["rule","rule","rule"]}',
+  'Mirror the direction the user describes exactly: a strategy that buys dips is a LONG strategy — never describe it as short.',
+].join(' ');
+
+// A symbol the user explicitly named outranks whatever pair the model picks.
+function mentionedPair(text, snapshot) {
+  const t = String(text).toLowerCase();
+  const symbols = new Set(snapshot.map((s) => s.symbol));
+  const mentioned = UNIVERSE.find((u) => t.includes(u.symbol.toLowerCase()))
+    ?? (t.includes('gold') ? UNIVERSE.find((u) => u.symbol === 'XAU/USD') : null);
+  return mentioned && symbols.has(mentioned.symbol) ? mentioned.symbol : null;
+}
 
 function hashStr(str) {
   let h = 2166136261;
@@ -64,19 +85,74 @@ function genAiPlan(symbol, salt) {
   };
 }
 
-const DEFAULT_FORM = {
-  name: '', pair: 'EUR/USD', direction: 'both', fastEma: 9, slowEma: 21,
-  rsiFilter: false, rsiMin: 40, rsiMax: 60, slPips: 12, tpPips: 24,
-};
+function simulatedStrategy(text, snapshot) {
+  const t = text.toLowerCase();
+  const sweep = t.includes('liquidity') || t.includes('sweep') || t.includes('stop run') || t.includes('stop-run');
+  const fvg = t.includes('fvg') || t.includes('fair value');
+  const breakout = t.includes('breakout') || t.includes('break of structure') || t.includes('bos');
+  const ema = t.includes('ema') || t.includes('moving average');
+  const reversion = t.includes('reversal') || t.includes('mean reversion') || t.includes('inversion');
+  const mentioned = mentionedPair(text, snapshot);
+  const pair = mentioned ?? snapshot[0]?.symbol ?? 'EUR/USD';
+
+  let title = 'Custom Price Action Strategy';
+  if (sweep && (fvg || reversion)) title = 'Liquidity Sweep & Inversion FVG Reversal Strategy';
+  else if (sweep) title = 'Liquidity Sweep Reversal Strategy';
+  else if (fvg) title = 'Fair Value Gap Continuation Strategy';
+  else if (breakout) title = 'Range Breakout Continuation Strategy';
+  else if (ema) title = 'EMA Trend-Following Strategy';
+  else if (reversion) title = 'Mean Reversion Strategy';
+
+  const bias = engine.getState(pair)?.score >= 0 ? 'long' : 'short';
+  return {
+    title,
+    pair,
+    analysis: [
+      sweep
+        ? 'This strategy captures market reversals by identifying a liquidity sweep followed by a market structure shift and an inversion fair value gap. It seeks to enter when price stop-runs previous highs or lows, signalling displacement toward the opposite liquidity pool.'
+        : 'This strategy aligns entries with the prevailing momentum stack while filtering chop through a structural bias check on the execution timeframe.',
+      `The engine maps these rules onto the live ${pair} tape: setups are flagged as structure prints, confirmed against the 21-EMA momentum filter, and validated inside session liquidity windows before entry.`,
+    ],
+    entryRules: [
+      sweep
+        ? 'Wait for a stop-run sweeping buy-side or sell-side liquidity, then a market structure shift confirming displacement in the reversal direction'
+        : `Trade only in the ${bias} direction while price holds the 21-EMA momentum envelope on the 15m chart`,
+      sweep
+        ? 'Enter on the retest of the inversion fair value gap left by the displacement candle — invalidation sits beyond the sweep wick'
+        : 'Trigger on a momentum tick confirmed by a closed candle in the trade direction',
+      'Skip setups when spread widens beyond 1.8× its rolling average or price sits mid-range with no liquidity reference',
+      'One position at a time; wait for a closed candle before re-entering after a stop',
+    ],
+    riskRules: [
+      sweep
+        ? 'Stop loss beyond the wick of the liquidity sweep candle — never widen it'
+        : 'Stop loss at 1.2× ATR(14) from entry — never widen it',
+      sweep
+        ? 'Take profit at the opposite-side liquidity pool; trail to break-even once the first pool is tagged'
+        : 'Take profit at 2.4× ATR(14); trail the stop once price moves 1× ATR in favor',
+      'Risk 0.5–1% of equity per trade; daily loss cap of 3%',
+      'Time-stop: exit any trade still flat after 4 hours of stagnation',
+    ],
+    simulated: true,
+  };
+}
 
 export default function StrategiesPage() {
-  const [tab, setTab] = useState('ai');
-  const [aiSymbol, setAiSymbol] = useState('EUR/USD');
+  const [tab, setTab] = useState('own');
+  const [desc, setDesc] = useState('');
+  const [files, setFiles] = useState([]); // {name, isImage, dataUrl?}
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState(null);
+  const [active, setActive] = useState(() => loadSettings().activeStrategyData ?? null);
+  const [pairs, setPairs] = useState(() => engine.getSnapshot());
+  const [tf, setTf] = useState('15m');
+  const [aiSymbol, setAiSymbol] = useState(() => engine.getSnapshot()[0]?.symbol ?? 'EUR/USD');
   const [salt, setSalt] = useState(1);
   const [autoSet, setAutoSet] = useState(() => new Set(loadSettings().autoTrade));
-  const [strategies, setStrategies] = useState(() => loadStrategies());
-  const [form, setForm] = useState(DEFAULT_FORM);
-  const [savedFlash, setSavedFlash] = useState(false);
+  const fileRef = useRef(null);
+  const hasKey = aiReady(loadSettings());
+
+  useEffect(() => engine.subscribe((list) => setPairs(list)), []);
 
   const plan = useMemo(() => genAiPlan(aiSymbol, salt), [aiSymbol, salt]);
 
@@ -85,230 +161,242 @@ export default function StrategiesPage() {
     setAutoSet(new Set(loadSettings().autoTrade));
   };
 
-  const saveList = (list) => {
-    setStrategies(list);
-    saveStrategies(list);
-    engine.syncStrategies(list);
+  const pickFiles = async (list) => {
+    const added = [];
+    for (const file of list ?? []) {
+      const item = { name: file.name, isImage: file.type.startsWith('image/') };
+      if (item.isImage) {
+        const raw = await new Promise((res) => {
+          const r = new FileReader();
+          r.onload = () => res(r.result);
+          r.readAsDataURL(file);
+        });
+        item.dataUrl = await downscale(raw);
+      }
+      added.push(item);
+    }
+    if (added.length) setFiles((prev) => [...prev, ...added]);
   };
 
-  const submit = (e) => {
-    e.preventDefault();
-    if (!form.name.trim()) return;
-    const st = {
-      id: `st-${Date.now().toString(36)}`,
-      name: form.name.trim(),
-      pair: form.pair,
-      direction: form.direction,
-      fastEma: +form.fastEma,
-      slowEma: +form.slowEma,
-      rsiFilter: form.rsiFilter,
-      rsiMin: +form.rsiMin,
-      rsiMax: +form.rsiMax,
-      slPips: +form.slPips,
-      tpPips: +form.tpPips,
-      active: true,
-      createdAt: Date.now(),
-    };
-    saveList([st, ...strategies]);
-    setForm(DEFAULT_FORM);
-    setSavedFlash(true);
-    setTimeout(() => setSavedFlash(false), 1600);
+  const analyze = async () => {
+    if (!desc.trim() || busy) return;
+    setBusy(true);
+    setError(null);
+    const settings = loadSettings();
+    try {
+      if (aiReady(settings)) {
+        // Text-only local models reject image parts — analyze the text alone.
+        const attach = aiSupportsVision(settings);
+        const content = [
+          { type: 'text', text: `Analyze this trading strategy:\n\n${desc}` },
+          ...files.filter((f) => attach && f.dataUrl).map((f) => ({ type: 'image_url', image_url: { url: f.dataUrl } })),
+        ];
+        const res = await fetch(`${settings.aiBaseUrl || 'https://api.openai.com/v1'}/chat/completions`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            ...aiAuthHeaders(settings),
+          },
+          body: JSON.stringify({
+            model: settings.aiModel || 'gpt-4o-mini',
+            temperature: 0.2,
+            messages: [
+              { role: 'system', content: SYSTEM_PROMPT },
+              { role: 'user', content },
+            ],
+          }),
+        });
+        if (!res.ok) throw new Error(`AI API responded ${res.status}`);
+        const data = await res.json();
+        const text = data.choices?.[0]?.message?.content ?? '';
+        const parsed = parseJsonLoose(text);
+        if (!parsed) throw new Error('Could not parse the model response.');
+        // Signals may only target instruments the user enabled in their universe,
+        // and a symbol they named in the description outranks the model's pick.
+        const enabled = pairs.length ? pairs : engine.getSnapshot();
+        const explicit = mentionedPair(desc, enabled);
+        const pair = explicit
+          ?? (enabled.some((p) => p.symbol === parsed.pair) ? parsed.pair : null)
+          ?? (enabled.some((p) => p.symbol === settings.defaultPair) ? settings.defaultPair : null)
+          ?? enabled[0]?.symbol
+          ?? 'EUR/USD';
+        setActive({
+          title: parsed.title || 'Custom Strategy',
+          pair,
+          analysis: Array.isArray(parsed.analysis) ? parsed.analysis.map(String) : [String(parsed.analysis ?? '')].filter(Boolean),
+          entryRules: Array.isArray(parsed.entryRules) ? parsed.entryRules.map(String) : [],
+          riskRules: Array.isArray(parsed.riskRules) ? parsed.riskRules.map(String) : [],
+          simulated: false,
+        });
+      } else {
+        await new Promise((r) => setTimeout(r, 1400));
+        setActive(simulatedStrategy(desc, pairs));
+      }
+    } catch (err) {
+      setError(err.message || 'Analysis failed. Check your AI model settings.');
+    } finally {
+      setBusy(false);
+    }
   };
 
-  const toggleActive = (id) => {
-    saveList(strategies.map((s) => (s.id === id ? { ...s, active: !s.active } : s)));
-  };
+  const current = useMemo(() => (
+    tab === 'ai'
+      ? {
+        title: `${plan.style} — ${aiSymbol}`,
+        pair: aiSymbol,
+        analysis: [plan.thesis],
+        entryRules: plan.entryRules,
+        riskRules: plan.riskRules,
+        simulated: false,
+      }
+      : active
+  ), [tab, plan, aiSymbol, active]);
 
-  const remove = (id) => {
-    saveList(strategies.filter((s) => s.id !== id));
-  };
+  const chartPair = pairs.find((p) => p.symbol === current?.pair) ?? pairs[0];
 
-  const f = (k) => (e) => setForm({ ...form, [k]: e.target.type === 'checkbox' ? e.target.checked : e.target.value });
+  useEffect(() => {
+    if (current) saveSettings({ activeStrategy: current.title, activeStrategyData: current });
+  }, [current]);
 
   return (
-    <div className="page">
-      <div className="seg-tabs">
-        <button className={`seg-tab${tab === 'ai' ? ' active' : ''}`} onClick={() => setTab('ai')}>
-          <Brain size={14} /> AI Strategy
+    <div className="page strat-page">
+      <p className="strat-lead rise">Bring your own strategy or let AI build one from live market analysis</p>
+
+      <div className="seg-tabs rise">
+        <button className={`seg-tab${tab === 'own' ? ' active' : ''}`} onClick={() => setTab('own')}>
+          <FileText size={14} /> My Own Strategy
         </button>
-        <button className={`seg-tab${tab === 'custom' ? ' active' : ''}`} onClick={() => setTab('custom')}>
-          <ListChecks size={14} /> My Strategy
+        <button className={`seg-tab${tab === 'ai' ? ' active' : ''}`} onClick={() => setTab('ai')}>
+          <Brain size={14} /> AI Market Strategy
         </button>
       </div>
 
-      {tab === 'ai' ? (
-        <div className="ai-strat-grid">
-          <section className="panel rise">
-            <div className="panel-head">
-              <span className="panel-title"><Brain size={14} /> Strategy Generator</span>
-              <span className="panel-sub">heuristic engine — no key required</span>
+      {tab === 'own' ? (
+        <section className="panel strat-input rise" style={{ animationDelay: '60ms' }}>
+          <div className="panel-head">
+            <span className="panel-title"><FileText size={14} /> Describe Your Strategy</span>
+          </div>
+          <textarea
+            className="inp strat-desc"
+            placeholder="e.g. liquidity sweep of buy side, inverse fair value gap on inversion, stop loss on the sweep wick, take profit at opposite-side liquidity…"
+            value={desc}
+            onChange={(e) => setDesc(e.target.value)}
+          />
+          <div className="attach-row">
+            <div className="attach-label">
+              <span className="k">Upload screenshots or videos</span>
+              <span className="sub">optional, multiple allowed</span>
             </div>
+            <button className="btn ghost sm" onClick={() => fileRef.current?.click()}>
+              <Upload size={13} /> Add Files
+            </button>
+          </div>
+          {files.length > 0 && (
+            <div className="file-chips">
+              {files.map((f, i) => (
+                <span key={`${f.name}-${i}`} className="file-chip">
+                  {f.isImage && f.dataUrl ? <img src={f.dataUrl} alt="" /> : <FileText size={13} />}
+                  <span>{f.name}</span>
+                  <button onClick={() => setFiles(files.filter((_, j) => j !== i))} title="Remove file"><X size={12} /></button>
+                </span>
+              ))}
+            </div>
+          )}
+          <div className="btn-row">
+            <button className="btn primary" disabled={!desc.trim() || busy} onClick={analyze}>
+              <Sparkles size={15} /> {busy ? 'Analyzing strategy…' : 'Analyze Strategy with AI'}
+            </button>
+          </div>
+          {!hasKey && (
+            <p className="ai-note">No AI API key configured — analysis runs in simulated mode. Add a key in Settings for real strategy analysis.</p>
+          )}
+          {error && <p className="ai-error"><AlertTriangle size={13} /> {error}</p>}
+          {busy && (
+            <div className="ai-shimmer">
+              <div className="sh-line w60" /><div className="sh-line w90" /><div className="sh-line w40" />
+            </div>
+          )}
+        </section>
+      ) : (
+        <section className="panel strat-input rise" style={{ animationDelay: '60ms' }}>
+          <div className="panel-head">
+            <span className="panel-title"><Brain size={14} /> Strategy Generator</span>
+            <span className="panel-sub">heuristic engine — no key required</span>
+          </div>
+          <div className="gen-bar">
             <div className="field">
               <label>Instrument</label>
               <select className="inp" value={aiSymbol} onChange={(e) => { setAiSymbol(e.target.value); setSalt(1); }}>
-                {UNIVERSE.map((d) => <option key={d.symbol} value={d.symbol}>{d.symbol} · {d.group}</option>)}
+                {pairs.map((p) => <option key={p.symbol} value={p.symbol}>{p.symbol} · {p.group}</option>)}
               </select>
             </div>
-            <div className="ai-plan-stats">
-              {plan.stats.map((s) => (
-                <div key={s.label} className="mini-stat">
-                  <div className="v">{s.value}</div>
-                  <div className="k">{s.label}</div>
-                </div>
-              ))}
-            </div>
-            <div className="btn-row">
-              <button className="btn ghost" onClick={() => setSalt((x) => x + 1)}>
-                <RefreshCw size={14} /> Regenerate
-              </button>
-              <button className={`btn ${autoSet.has(aiSymbol) ? 'warn' : 'primary'}`} onClick={() => toggleAuto(aiSymbol)}>
-                <ShieldCheck size={14} />
-                {autoSet.has(aiSymbol) ? `Auto-trade ON — disarm` : 'Enable auto-trade on this pair'}
-              </button>
-            </div>
-            {plan.levels && (
-              <div className="sig-levels" style={{ marginTop: 14 }}>
-                <div><span>Entry zone</span><b>{plan.levels.entry}</b></div>
-                <div><span>Protective stop</span><b className="dn">{plan.levels.sl}</b></div>
-                <div><span>Profit target</span><b className="up">{plan.levels.tp}</b></div>
+            <button className="btn ghost" onClick={() => setSalt((x) => x + 1)}>
+              <RefreshCw size={14} /> Regenerate
+            </button>
+            <button className={`btn ${autoSet.has(aiSymbol) ? 'warn' : 'primary'}`} onClick={() => toggleAuto(aiSymbol)}>
+              <ShieldCheck size={14} />
+              {autoSet.has(aiSymbol) ? 'Auto-trade ON — disarm' : 'Enable auto-trade'}
+            </button>
+          </div>
+          <div className="ai-plan-stats">
+            {plan.stats.map((s) => (
+              <div key={s.label} className="mini-stat">
+                <div className="v">{s.value}</div>
+                <div className="k">{s.label}</div>
               </div>
-            )}
-          </section>
-
-          <section className="panel rise" style={{ animationDelay: '60ms' }}>
-            <div className="panel-head">
-              <span className="panel-title"><Target size={14} /> {plan.style}</span>
+            ))}
+          </div>
+          {plan.levels && (
+            <div className="sig-levels">
+              <div><span>Entry zone</span><b>{plan.levels.entry}</b></div>
+              <div><span>Protective stop</span><b className="dn">{plan.levels.sl}</b></div>
+              <div><span>Profit target</span><b className="up">{plan.levels.tp}</b></div>
             </div>
-            <div className="ai-block">
-              <div className="k">Thesis</div>
-              <p>{plan.thesis}</p>
-            </div>
-            <div className="strat-cols">
-              <div className="ai-block">
-                <div className="k">Entry rules</div>
-                <ul className="rule-list">
-                  {plan.entryRules.map((r) => <li key={r}>{r}</li>)}
-                </ul>
-              </div>
-              <div className="ai-block">
-                <div className="k">Risk rules</div>
-                <ul className="rule-list">
-                  {plan.riskRules.map((r) => <li key={r}>{r}</li>)}
-                </ul>
-              </div>
-            </div>
-          </section>
-        </div>
-      ) : (
-        <div className="custom-strat-grid">
-          <section className="panel rise">
-            <div className="panel-head">
-              <span className="panel-title"><Plus size={14} /> Strategy Builder</span>
-              <span className="panel-sub">EMA crossover system, executed live</span>
-            </div>
-            <form onSubmit={submit} className="strat-form">
-              <div className="field">
-                <label>Strategy name</label>
-                <input className="inp" placeholder="e.g. London momentum 9/21" value={form.name} onChange={f('name')} required />
-              </div>
-              <div className="field-row">
-                <div className="field">
-                  <label>Instrument</label>
-                  <select className="inp" value={form.pair} onChange={f('pair')}>
-                    {UNIVERSE.map((d) => <option key={d.symbol} value={d.symbol}>{d.symbol}</option>)}
-                  </select>
-                </div>
-                <div className="field">
-                  <label>Direction</label>
-                  <select className="inp" value={form.direction} onChange={f('direction')}>
-                    <option value="both">Long &amp; Short</option>
-                    <option value="long">Long only</option>
-                    <option value="short">Short only</option>
-                  </select>
-                </div>
-              </div>
-              <div className="field-row">
-                <div className="field">
-                  <label>Fast EMA</label>
-                  <input className="inp" type="number" min="2" max="100" value={form.fastEma} onChange={f('fastEma')} />
-                </div>
-                <div className="field">
-                  <label>Slow EMA</label>
-                  <input className="inp" type="number" min="3" max="200" value={form.slowEma} onChange={f('slowEma')} />
-                </div>
-              </div>
-              <div className="field-row">
-                <div className="field">
-                  <label>Stop loss (pips)</label>
-                  <input className="inp" type="number" min="1" max="500" value={form.slPips} onChange={f('slPips')} />
-                </div>
-                <div className="field">
-                  <label>Take profit (pips)</label>
-                  <input className="inp" type="number" min="1" max="1000" value={form.tpPips} onChange={f('tpPips')} />
-                </div>
-              </div>
-              <label className="check-row">
-                <input type="checkbox" checked={form.rsiFilter} onChange={f('rsiFilter')} />
-                RSI confirmation filter
-              </label>
-              {form.rsiFilter && (
-                <div className="field-row">
-                  <div className="field">
-                    <label>RSI min (for longs)</label>
-                    <input className="inp" type="number" min="1" max="99" value={form.rsiMin} onChange={f('rsiMin')} />
-                  </div>
-                  <div className="field">
-                    <label>RSI max (for shorts)</label>
-                    <input className="inp" type="number" min="1" max="99" value={form.rsiMax} onChange={f('rsiMax')} />
-                  </div>
-                </div>
-              )}
-              <button className="btn primary" type="submit">
-                <Save size={14} /> {savedFlash ? 'Saved — engine synced' : 'Save strategy'}
-              </button>
-            </form>
-          </section>
-
-          <section className="panel rise" style={{ animationDelay: '60ms' }}>
-            <div className="panel-head">
-              <span className="panel-title">Saved Strategies</span>
-              <span className="panel-sub">{strategies.filter((s) => s.active).length} active</span>
-            </div>
-            <div className="strat-list">
-              {strategies.length === 0 && (
-                <p className="dim" style={{ padding: '18px 4px' }}>No custom strategies yet. Build one on the left — it starts executing against the live simulator immediately.</p>
-              )}
-              {strategies.map((st) => {
-                const d = UNIVERSE.find((u) => u.symbol === st.pair);
-                return (
-                  <div key={st.id} className={`strat-card${st.active ? ' active' : ''}`}>
-                    <div className="strat-card-head">
-                      {d && <Badges base={d.base} quote={d.quote} size={22} />}
-                      <div>
-                        <b>{st.name}</b>
-                        <div className="dim" style={{ fontSize: 11 }}>
-                          {st.pair} · EMA {st.fastEma}/{st.slowEma} · {st.direction} · SL {st.slPips} / TP {st.tpPips} pips
-                          {st.rsiFilter && ` · RSI ${st.rsiMin}–${st.rsiMax}`}
-                        </div>
-                      </div>
-                      <button
-                        className={`switch${st.active ? ' on' : ''}`}
-                        onClick={() => toggleActive(st.id)}
-                        title={st.active ? 'Deactivate' : 'Activate'}
-                      >
-                        <i />
-                      </button>
-                      <button className="btn ghost sm icon" onClick={() => remove(st.id)} title="Delete strategy">
-                        <Trash2 size={13} />
-                      </button>
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          </section>
-        </div>
+          )}
+        </section>
       )}
+
+      <section className="active-strat rise" style={{ animationDelay: '120ms' }}>
+        <div className="panel active-analysis">
+          <div className="active-eyebrow">Active Strategy</div>
+          <h2 className="active-title">{current ? current.title : 'No active strategy yet'}</h2>
+          {current ? (
+            <>
+              <div className="ai-block">
+                <div className="k">AI Analysis</div>
+                {current.analysis.map((p, i) => <p key={i}>{p}</p>)}
+              </div>
+              <div className="strat-cols">
+                <div className="ai-block">
+                  <div className="k">Entry rules</div>
+                  <ul className="rule-list">
+                    {current.entryRules.map((r) => <li key={r}>{r}</li>)}
+                  </ul>
+                </div>
+                <div className="ai-block">
+                  <div className="k">Risk rules</div>
+                  <ul className="rule-list">
+                    {current.riskRules.map((r) => <li key={r}>{r}</li>)}
+                  </ul>
+                </div>
+              </div>
+              {current.simulated && (
+                <div className="ai-risk">
+                  <AlertTriangle size={12} /> Simulated read — add an AI model API key in Settings for true strategy analysis.
+                </div>
+              )}
+            </>
+          ) : (
+            <p className="dim empty-strat">
+              Describe your strategy above and hit Analyze, or open the AI Market Strategy tab to generate one from live market analysis.
+            </p>
+          )}
+        </div>
+        {chartPair && <PriceChart pair={chartPair} symbol={chartPair.symbol} tf={tf} onTfChange={setTf} />}
+      </section>
+
+      <input ref={fileRef} type="file" accept="image/*,video/*" multiple hidden
+        onChange={(e) => { pickFiles(e.target.files); e.target.value = ''; }} />
     </div>
   );
 }

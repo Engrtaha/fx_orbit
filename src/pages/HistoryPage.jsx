@@ -1,7 +1,8 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { TrendingUp, Percent, Layers, Activity, Sigma } from 'lucide-react';
 import { engine, fmt } from '../data/marketEngine';
 import { Badges } from '../components/shared';
+import TradeDetail from '../components/TradeDetail';
 
 const FILTERS = ['All', 'Open', 'Wins', 'Losses'];
 const SOURCES = ['All Sources', 'Manual', 'AI Signal', 'Strategy'];
@@ -15,12 +16,12 @@ function timeAgo(ts) {
 }
 
 function EquityCurve({ trades }) {
-  const pts = useMemo(() => {
-    const closed = trades
-      .filter((t) => t.status === 'closed')
-      .slice()
-      .sort((a, b) => a.closedAt - b.closedAt);
-    if (closed.length < 2) return null;
+  const closed = trades
+    .filter((t) => t.status === 'closed')
+    .slice()
+    .sort((a, b) => a.closedAt - b.closedAt);
+  let pts = null;
+  if (closed.length >= 2) {
     let cum = 0;
     const data = closed.map((t) => ({ t: t.closedAt, v: (cum += t.pnl) }));
     const min = Math.min(0, ...data.map((d) => d.v));
@@ -31,8 +32,8 @@ function EquityCurve({ trades }) {
       const y = H - P - ((d.v - min) / (max - min)) * (H - 2 * P);
       return `${i === 0 ? 'M' : 'L'}${x.toFixed(1)},${y.toFixed(1)}`;
     }).join(' ');
-    return { path, end: data[data.length - 1].v, W, H, zero: H - P - ((0 - min) / (max - min)) * (H - 2 * P) };
-  }, [trades]);
+    pts = { path, end: data[data.length - 1].v, W, H, zero: H - P - ((0 - min) / (max - min)) * (H - 2 * P) };
+  }
 
   if (!pts) return <div className="eq-empty">Close more trades to draw the equity curve.</div>;
   return (
@@ -54,19 +55,20 @@ export default function HistoryPage() {
   const [, setTick] = useState(0);
   const [filter, setFilter] = useState('All');
   const [source, setSource] = useState('All Sources');
+  const [detail, setDetail] = useState(null);
 
   useEffect(() => engine.subscribe((_, tick) => setTick(tick)), []);
 
   const trades = engine.getTrades();
   const stats = engine.tradeStats();
 
-  const filtered = useMemo(() => trades.filter((t) => {
+  const filtered = trades.filter((t) => {
     if (filter === 'Open' && t.status !== 'open') return false;
     if (filter === 'Wins' && !(t.status === 'closed' && t.pnl > 0)) return false;
     if (filter === 'Losses' && !(t.status === 'closed' && t.pnl <= 0)) return false;
     if (source !== 'All Sources' && t.source !== source) return false;
     return true;
-  }), [trades, filter, source]);
+  });
 
   return (
     <div className="page">
@@ -126,7 +128,7 @@ export default function HistoryPage() {
               const s = engine.getState(t.symbol);
               const dec = s ? s.decimals : 5;
               return (
-                <tr key={t.id}>
+                <tr key={t.id} className="tr-click" onClick={() => setDetail(t)} title="View trade detail">
                   <td className="dim">{t.id}</td>
                   <td>
                     <span className="wl-pair">
@@ -160,6 +162,8 @@ export default function HistoryPage() {
           </tbody>
         </table>
       </section>
+
+      {detail && <TradeDetail trade={detail} onClose={() => setDetail(null)} />}
     </div>
   );
 }

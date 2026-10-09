@@ -1,13 +1,16 @@
 import { NavLink } from 'react-router-dom';
 import {
-  LayoutDashboard, Zap, History, Newspaper, Brain, Settings,
+  LayoutDashboard, Zap, LineChart, Newspaper, Clock, History, Wallet, Brain, Settings,
 } from 'lucide-react';
 
 const NAV = [
   { icon: LayoutDashboard, label: 'Dashboard', to: '/' },
   { icon: Zap, label: 'Signals', to: '/signals' },
-  { icon: History, label: 'History', to: '/history' },
+  { icon: LineChart, label: 'Charts', to: '/charts' },
   { icon: Newspaper, label: 'News', to: '/news' },
+  { icon: Clock, label: 'Sessions', to: '/sessions' },
+  { icon: History, label: 'History', to: '/history' },
+  { icon: Wallet, label: 'Portfolio', to: '/portfolio' },
   { icon: Brain, label: 'Strategies', to: '/strategies' },
 ];
 

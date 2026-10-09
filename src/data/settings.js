@@ -69,7 +69,20 @@ const SETTINGS_KEY = 'fxorbit-settings';
 const STRATEGIES_KEY = 'fxorbit-strategies';
 
 const defaults = {
-  tvApiKey: '',
+  profileName: 'coder nice',
+  profileEmail: 'codernice07@gmail.com',
+  riskPerTrade: 2,
+  defaultPair: 'XAU/USD',
+  initialBalance: 100,
+  balanceAdjust: 0,
+  activeStrategy: '',
+  activeStrategyData: null,
+  tvEnabled: false,
+  tvBackendUrl: 'http://localhost:5178',
+  newsApiKey: '',
+  newsProvider: 'rss',
+  newsCategory: 'forex',
+  aiProvider: 'openai',
   aiApiKey: '',
   aiModel: 'gpt-4o-mini',
   aiBaseUrl: 'https://api.openai.com/v1',
@@ -87,14 +100,35 @@ export function loadSettings() {
   }
 }
 
+const listeners = new Set();
+
+export function subscribeSettings(cb) {
+  listeners.add(cb);
+  const onStorage = (e) => {
+    if (e.key === SETTINGS_KEY) cb(loadSettings());
+  };
+  window.addEventListener('storage', onStorage);
+  return () => {
+    listeners.delete(cb);
+    window.removeEventListener('storage', onStorage);
+  };
+}
+
+function emitSettings() {
+  const next = loadSettings();
+  listeners.forEach((cb) => cb(next));
+}
+
 export function saveSettings(patch) {
   const next = { ...loadSettings(), ...patch };
   localStorage.setItem(SETTINGS_KEY, JSON.stringify(next));
+  emitSettings();
   return next;
 }
 
 export function resetSettings() {
   localStorage.removeItem(SETTINGS_KEY);
+  emitSettings();
   return loadSettings();
 }
 
@@ -111,3 +145,24 @@ export function saveStrategies(list) {
 }
 
 export const GROUPS = ['Major', 'Cross', 'Exotic', 'Metal', 'Index', 'Stock'];
+
+// AI backends. Both speak the OpenAI /chat/completions shape; Ollama serves it
+// at /v1 on the local machine and needs no key.
+export const AI_PROVIDERS = {
+  openai: {
+    label: 'OpenAI-compatible',
+    base: 'https://api.openai.com/v1',
+    model: 'gpt-4o-mini',
+    keyRequired: true,
+    vision: true,
+  },
+  ollama: {
+    label: 'Ollama (local)',
+    base: 'http://localhost:11434/v1',
+    // Light default: on an 8 GB machine the 8B finance model (~5.4 GB resident)
+    // chokes the system — a 3B model loads in seconds and leaves RAM headroom.
+    model: 'llama3.2:latest',
+    keyRequired: false,
+    vision: false,
+  },
+};

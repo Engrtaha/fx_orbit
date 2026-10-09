@@ -3,7 +3,7 @@
 // tiny pub/sub. Data is simulated client-side; anchors sit near real market
 // levels so the terminal feels alive without an API key.
 
-import { UNIVERSE, DEFAULT_ENABLED, loadSettings, saveSettings, loadStrategies } from './settings';
+import { UNIVERSE, loadSettings, saveSettings, loadStrategies } from './settings';
 
 export const TIMEFRAMES = ['1m', '5m', '15m', '1H', '4H', '1D'];
 
@@ -124,6 +124,7 @@ class MarketEngine {
       candlesByTf: new Map(),
       rsi: 50, momentum: 0, score: 0, signal: 'NEUTRAL', confidence: 54,
       detailTick: -1, detail: null,
+      tv: false,
     };
     const m1 = genHistory(def, 1, def.price);
     state.candlesByTf.set('1m', m1);
@@ -167,10 +168,41 @@ class MarketEngine {
     s.changePct = (s.change / s.dayOpen) * 100;
   }
 
+  refreshIndicators(s) {
+    const m1 = s.candlesByTf.get('1m');
+    if (!m1 || !m1.length) return;
+    s.liveCandle = m1[m1.length - 1];
+    const closes = m1.map((c) => c.close);
+    const next = s.liveCandle.close;
+    s.rsi = calcRsi(closes);
+    const back = closes[closes.length - 11] ?? closes[0];
+    s.momentum = ((next - back) / back) * 100;
+
+    const score =
+      (s.rsi > 65 ? 2 : s.rsi > 55 ? 1 : 0) +
+      (s.rsi < 35 ? -2 : s.rsi < 45 ? -1 : 0) +
+      (s.momentum > 0.05 ? 2 : s.momentum > 0.015 ? 1 : 0) +
+      (s.momentum < -0.05 ? -2 : s.momentum < -0.015 ? -1 : 0);
+    s.score = score;
+    s.signal =
+      score >= 3 ? 'STRONG BUY' : score >= 1 ? 'BUY'
+      : score <= -3 ? 'STRONG SELL' : score <= -1 ? 'SELL' : 'NEUTRAL';
+    s.confidence = Math.min(97, 54 + Math.abs(score) * 10);
+  }
+
   tick() {
     this.tickCount += 1;
     const roll = this.tickCount % 8 === 0;
     for (const s of this.states.values()) {
+      if (s.tv) {
+        // Price is driven by the TradingView feed; tick() only runs the
+        // trade/strategy bookkeeping on top of the realtime candles.
+        this.refreshIndicators(s);
+        this.checkTradeExits(s);
+        this.maybeAutoTrade(s);
+        if (roll) this.checkStrategies(s);
+        continue;
+      }
       const stepVol = s.vol * 0.12;
       const prev = s.liveCandle.close;
       const next = Math.max(prev * (1 + (Math.random() - 0.5) * 2 * stepVol), s.pip * 10);
@@ -199,23 +231,7 @@ class MarketEngine {
       s.spark.push(next);
       if (s.spark.length > 90) s.spark.shift();
 
-      const m1 = s.candlesByTf.get('1m');
-      s.liveCandle = m1[m1.length - 1];
-      const closes = m1.map((c) => c.close);
-      s.rsi = calcRsi(closes);
-      const back = closes[closes.length - 11] ?? closes[0];
-      s.momentum = ((next - back) / back) * 100;
-
-      const score =
-        (s.rsi > 65 ? 2 : s.rsi > 55 ? 1 : 0) +
-        (s.rsi < 35 ? -2 : s.rsi < 45 ? -1 : 0) +
-        (s.momentum > 0.05 ? 2 : s.momentum > 0.015 ? 1 : 0) +
-        (s.momentum < -0.05 ? -2 : s.momentum < -0.015 ? -1 : 0);
-      s.score = score;
-      s.signal =
-        score >= 3 ? 'STRONG BUY' : score >= 1 ? 'BUY'
-        : score <= -3 ? 'STRONG SELL' : score <= -1 ? 'SELL' : 'NEUTRAL';
-      s.confidence = Math.min(97, 54 + Math.abs(score) * 10);
+      this.refreshIndicators(s);
       this.derive(s);
 
       this.checkTradeExits(s);
@@ -223,6 +239,156 @@ class MarketEngine {
       if (roll) this.checkStrategies(s);
     }
     this.emit();
+  }
+
+  // ── TradingView realtime ingest ─────────────────────────────────────────────
+  // All TV payloads already use the engine candle serialization
+  // ({ time: unixSeconds, open, high, low, close, volume }), so ingestion is
+  // a straight merge; symbols flagged tv=true skip the simulated random walk.
+
+  scheduleEmit() {
+    if (this._emitQueued) return;
+    this._emitQueued = true;
+    setTimeout(() => {
+      this._emitQueued = false;
+      this.emit();
+    }, 250);
+  }
+
+  setTvLive(symbol, live) {
+    const s = this.states.get(symbol);
+    if (s) s.tv = live;
+  }
+
+  markAllTv(live) {
+    for (const s of this.states.values()) s.tv = live;
+  }
+
+  // Sim → live transition for one symbol: rebase open trades by the price gap
+  // so the book stays continuous instead of instantly hitting stops or booking
+  // an absurd jump in P&L purely because the feed repriced the symbol.
+  enterLive(s, newMid) {
+    if (s.tv || !(newMid > 0) || !(s.mid > 0)) return;
+    const factor = newMid / s.mid;
+    for (const t of this.trades) {
+      if (t.status !== 'open' || t.symbol !== s.symbol) continue;
+      t.entry *= factor;
+      t.sl *= factor;
+      t.tp *= factor;
+    }
+  }
+
+  applyTvHistory(symbol, tf, candles) {
+    const s = this.states.get(symbol);
+    if (!s || !candles?.length) return;
+    const arr = candles
+      .map((c) => ({
+        time: Math.floor(c.time),
+        open: +c.open,
+        high: +c.high,
+        low: +c.low,
+        close: +c.close,
+        volume: Math.round(c.volume ?? 0),
+      }))
+      .sort((a, b) => a.time - b.time);
+    const deduped = [];
+    for (const c of arr) {
+      if (deduped.length && deduped[deduped.length - 1].time === c.time) deduped[deduped.length - 1] = c;
+      else deduped.push(c);
+    }
+    while (deduped.length > 320) deduped.shift();
+    s.candlesByTf.set(tf, deduped);
+    if (tf === '1m') {
+      const prev = s.liveCandle?.close;
+      const last = deduped[deduped.length - 1];
+      this.enterLive(s, last.close);
+      s.dir = prev != null && last.close > prev ? 1 : last.close < prev ? -1 : 0;
+      s.mid = last.close;
+      // Re-anchor the day range to the real window; the seeded sim anchor
+      // would otherwise distort change/changePct.
+      s.dayOpen = deduped[0].open;
+      s.dayHigh = Math.max(...deduped.map((c) => c.high));
+      s.dayLow = Math.min(...deduped.map((c) => c.low));
+      s.spark = deduped.slice(-90).map((c) => c.close);
+      this.refreshIndicators(s);
+      this.derive(s);
+    }
+    s.tv = true;
+    this.scheduleEmit();
+  }
+
+  applyTvCandle(symbol, tf, candle) {
+    const s = this.states.get(symbol);
+    if (!s) return;
+    this.enterLive(s, +candle.close);
+    const c = {
+      time: Math.floor(candle.time),
+      open: +candle.open,
+      high: +candle.high,
+      low: +candle.low,
+      close: +candle.close,
+      volume: Math.round(candle.volume ?? 0),
+    };
+    let arr = s.candlesByTf.get(tf);
+    if (!arr) {
+      arr = [];
+      s.candlesByTf.set(tf, arr);
+    }
+    const last = arr[arr.length - 1];
+    if (!last || c.time > last.time) {
+      arr.push(c);
+      if (arr.length > 320) arr.shift();
+    } else if (c.time === last.time) {
+      arr[arr.length - 1] = c;
+    } else {
+      return; // stale bar
+    }
+    s.tv = true;
+    if (tf !== '1m') {
+      this.scheduleEmit();
+      return;
+    }
+    const prev = s.liveCandle?.close;
+    s.dir = prev != null && c.close > prev ? 1 : c.close < prev ? -1 : 0;
+    s.mid = c.close;
+    s.dayHigh = Math.max(s.dayHigh, c.high);
+    s.dayLow = Math.min(s.dayLow, c.low);
+    s.spark.push(c.close);
+    if (s.spark.length > 90) s.spark.shift();
+    this.refreshIndicators(s);
+    this.derive(s);
+    this.checkTradeExits(s);
+    this.maybeAutoTrade(s);
+    this.scheduleEmit();
+  }
+
+  applyTvTick(symbol, tick) {
+    const s = this.states.get(symbol);
+    if (!s || tick.price == null) return;
+    this.enterLive(s, tick.price);
+    const prev = s.mid;
+    s.dir = tick.price > prev ? 1 : tick.price < prev ? -1 : 0;
+    s.mid = tick.price;
+    s.dayHigh = Math.max(s.dayHigh, tick.price);
+    s.dayLow = Math.min(s.dayLow, tick.price);
+    s.spark.push(tick.price);
+    if (s.spark.length > 90) s.spark.shift();
+    const m1 = s.candlesByTf.get('1m');
+    const last = m1?.[m1.length - 1];
+    if (last) {
+      last.close = tick.price;
+      if (tick.price > last.high) last.high = tick.price;
+      if (tick.price < last.low) last.low = tick.price;
+      if (tick.volume != null) last.volume = Math.round(tick.volume);
+      s.liveCandle = last;
+    }
+    if (tick.bid != null) s.bid = tick.bid;
+    if (tick.ask != null) s.ask = tick.ask;
+    if (tick.change != null) s.change = tick.change;
+    if (tick.changePct != null) s.changePct = tick.changePct;
+    s.tv = true;
+    this.checkTradeExits(s);
+    this.scheduleEmit();
   }
 
   emit() {
@@ -346,7 +512,7 @@ class MarketEngine {
     this.trades.sort((a, b) => (b.closedAt ?? b.openedAt) - (a.closedAt ?? a.openedAt));
   }
 
-  openTrade({ symbol, side, source = 'Manual', strategyId = null, slPips, tpPips }) {
+  openTrade({ symbol, side, source = 'Manual', strategyId = null, slPips, tpPips, note = null }) {
     const s = this.states.get(symbol);
     if (!s) return null;
     const dir = side === 'BUY' ? 1 : -1;
@@ -357,7 +523,7 @@ class MarketEngine {
       id: `T-${String(++this.tradeSeq).padStart(3, '0')}`,
       symbol, side, lots: 0.1, entry, sl, tp,
       openedAt: Date.now(), openTick: this.tickCount,
-      source, strategyId, status: 'open',
+      source, strategyId, status: 'open', note,
     };
     this.trades.unshift(trade);
     return trade;

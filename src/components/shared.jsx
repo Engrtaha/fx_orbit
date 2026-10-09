@@ -71,7 +71,3 @@ export function Sparkline({ data, width = 92, height = 30, positive }) {
     </svg>
   );
 }
-
-export function signalClass(sig) {
-  return `sig sig-${sig.toLowerCase().replace(' ', '-')}`;
-}

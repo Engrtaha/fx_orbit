@@ -4,6 +4,8 @@ import {
 } from 'lightweight-charts';
 import { Activity } from 'lucide-react';
 import { TIMEFRAMES, engine, fmt, volatilityPips } from '../data/marketEngine';
+import { loadSettings } from '../data/settings';
+import { fetchTvHistory } from '../data/tvClient';
 import { chartCapture } from '../data/chartCapture';
 import { Badges, Delta } from './shared';
 
@@ -119,23 +121,34 @@ export default function PriceChart({ pair, symbol, tf, onTfChange }) {
     };
   }, []);
 
-  // load history when pair or timeframe changes
+  // load history when pair or timeframe changes; backfill real TradingView
+  // history first when the live feed is enabled (falls back to simulated)
   useEffect(() => {
+    let cancelled = false;
     const cs = candleRef.current;
     if (!cs) return;
-    const data = engine.getCandles(symbol, tf);
-    const dec = engine.getState(symbol).decimals;
-    const minMove = 10 ** -dec;
+    const settings = loadSettings();
+    const backfill = settings.tvEnabled
+      ? fetchTvHistory(settings.tvBackendUrl, symbol, tf).catch(() => 0)
+      : Promise.resolve(0);
 
-    cs.applyOptions({ priceFormat: { type: 'price', precision: dec, minMove } });
-    cs.setData(data.map((c) => ({ time: c.time, open: c.open, high: c.high, low: c.low, close: c.close })));
-    volRef.current.setData(
-      data.map((c) => ({ time: c.time, value: c.volume, color: c.close >= c.open ? UP : DOWN }))
-    );
-    const ema = emaSeries(data, 20);
-    emaLastRef.current = ema.length ? ema[ema.length - 1].value : null;
-    emaRef.current.setData(ema);
-    chartRef.current.timeScale().fitContent();
+    backfill.then(() => {
+      if (cancelled) return;
+      const data = engine.getCandles(symbol, tf);
+      const dec = engine.getState(symbol).decimals;
+      const minMove = 10 ** -dec;
+
+      cs.applyOptions({ priceFormat: { type: 'price', precision: dec, minMove } });
+      cs.setData(data.map((c) => ({ time: c.time, open: c.open, high: c.high, low: c.low, close: c.close })));
+      volRef.current.setData(
+        data.map((c) => ({ time: c.time, value: c.volume, color: c.close >= c.open ? UP : DOWN }))
+      );
+      const ema = emaSeries(data, 20);
+      emaLastRef.current = ema.length ? ema[ema.length - 1].value : null;
+      emaRef.current.setData(ema);
+      chartRef.current.timeScale().fitContent();
+    });
+    return () => { cancelled = true; };
   }, [symbol, tf]);
 
   // stream live ticks into the active chart

@@ -1,15 +1,14 @@
 import { useEffect, useMemo, useState } from 'react';
-import { useLocation, useNavigate } from 'react-router-dom';
+import { useNavigate } from 'react-router-dom';
 import { Search, Globe } from 'lucide-react';
 import { SESSIONS, fmt, sessionOpen } from '../data/marketEngine';
 import { Badges, Delta } from './shared';
 
-export default function TopBar({ pairs, selected, onSelect, eyebrow = 'FxOrbit Terminal', title = 'Market Analysis' }) {
+export default function TopBar({ pairs, selected, eyebrow = 'FxOrbit Terminal', title = 'Market Analysis' }) {
   const [query, setQuery] = useState('');
   const [focused, setFocused] = useState(false);
   const [now, setNow] = useState(() => new Date());
   const navigate = useNavigate();
-  const location = useLocation();
 
   useEffect(() => {
     const t = setInterval(() => setNow(new Date()), 1000);
@@ -28,12 +27,7 @@ export default function TopBar({ pairs, selected, onSelect, eyebrow = 'FxOrbit T
   const utc = now.toISOString().slice(11, 19);
 
   const pick = (symbol) => {
-    if (location.pathname !== '/') {
-      onSelect(symbol, true);
-      navigate('/');
-    } else {
-      onSelect(symbol);
-    }
+    navigate('/charts', { state: { symbol } });
     setQuery('');
   };
 
