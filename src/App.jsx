@@ -15,6 +15,7 @@ import { engine } from './data/marketEngine';
 import { loadSettings, subscribeSettings } from './data/settings';
 import { syncTvFeed } from './data/tvClient';
 import { tickSignals } from './data/signalEngine';
+import { startTradeSync } from './data/persistence';
 
 const TITLES = {
   '/': { eyebrow: 'Overview', title: 'Dashboard' },
@@ -38,10 +39,12 @@ function Layout() {
     syncTvFeed();
     const unsubSettings = subscribeSettings(() => syncTvFeed());
     const sigTimer = setInterval(() => { void tickSignals(); }, 1000);
+    const stopTradeSync = startTradeSync();
     return () => {
       unsub();
       unsubSettings();
       clearInterval(sigTimer);
+      stopTradeSync();
     };
   }, []);
 

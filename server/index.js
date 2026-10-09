@@ -11,6 +11,9 @@ import {
   getQuote,
   watchQuotes,
 } from './vendor/Tradingview-API/dist/data/index.js';
+import { initDb, dbStatus } from './db/index.js';
+import { saveNewsItems, recentNews, newsCount } from './db/news.js';
+import { saveTrades, loadTrades, tradeCount } from './db/tradeHistory.js';
 
 const PORT = Number(process.env.TV_PORT || 5178);
 // '::' = dual-stack, so ws://localhost and ws://127.0.0.1 both resolve
@@ -487,8 +490,44 @@ const json = (res, code, body) => {
   res.end(payload);
 };
 
+const MAX_BODY = 4 * 1024 * 1024;
+
+// Reads and parses a JSON request body; resolves null on malformed/oversized input.
+function readJson(req) {
+  return new Promise((resolve) => {
+    let size = 0;
+    const chunks = [];
+    req.on('data', (c) => {
+      size += c.length;
+      if (size > MAX_BODY) {
+        resolve(null);
+        req.destroy();
+        return;
+      }
+      chunks.push(c);
+    });
+    req.on('end', () => {
+      try { resolve(JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}')); }
+      catch { resolve(null); }
+    });
+    req.on('error', () => resolve(null));
+  });
+}
+
 const server = createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host}`);
+
+  // The browser sends JSON bodies with a preflight; without this the POST
+  // from the terminal is blocked before it reaches the trade routes.
+  if (req.method === 'OPTIONS') {
+    res.writeHead(204, {
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+      'Access-Control-Allow-Headers': 'Content-Type',
+      'Access-Control-Max-Age': '86400',
+    });
+    return res.end();
+  }
 
   if (url.pathname === '/api/status') {
     return json(res, 200, {
@@ -496,6 +535,7 @@ const server = createServer(async (req, res) => {
       service: 'fxorbit-tv-bridge',
       uptimeSec: Math.round(process.uptime()),
       sockets: wss.clients.size,
+      db: dbStatus(),
     });
   }
 
@@ -540,6 +580,8 @@ const server = createServer(async (req, res) => {
     };
     try {
       const feed = await newsFeed(params);
+      // Archive every pulled item into PostgreSQL; the response never blocks on it.
+      void saveNewsItems(feed.items).catch(() => { /* offline mode */ });
       return json(res, 200, {
         ok: true,
         fetchedAt: Math.floor(now / 1000),
@@ -551,6 +593,47 @@ const server = createServer(async (req, res) => {
     } catch (err) {
       return json(res, 502, { ok: false, error: String(err?.message ?? err) });
     }
+  }
+
+  // ── PostgreSQL archives: trade history + saved news ────────────────────────
+
+  if (url.pathname === '/api/trades' && req.method === 'GET') {
+    const limit = Math.min(5000, Math.max(1, Number(url.searchParams.get('limit')) || 500));
+    const status = url.searchParams.get('status');
+    const trades = await loadTrades({ limit, status: status || null });
+    return json(res, 200, { ok: dbStatus() !== 'down', db: dbStatus(), trades });
+  }
+
+  if (url.pathname === '/api/trades' && req.method === 'POST') {
+    const body = await readJson(req);
+    const trades = Array.isArray(body?.trades) ? body.trades : null;
+    if (!trades) return json(res, 400, { ok: false, error: 'expected { trades: [...] }' });
+    const stored = await saveTrades(trades);
+    return json(res, stored == null ? 503 : 200, {
+      ok: stored != null,
+      db: dbStatus(),
+      stored: stored ?? 0,
+      received: trades.length,
+    });
+  }
+
+  if (url.pathname === '/api/news/archive') {
+    const limit = Math.min(1000, Math.max(1, Number(url.searchParams.get('limit')) || 100));
+    const items = await recentNews({
+      limit,
+      feed: url.searchParams.get('feed') || null,
+      currency: url.searchParams.get('currency') || null,
+    });
+    return json(res, 200, { ok: dbStatus() !== 'down', db: dbStatus(), count: await newsCount(), items });
+  }
+
+  if (url.pathname === '/api/db/stats') {
+    return json(res, 200, {
+      ok: dbStatus() !== 'down',
+      db: dbStatus(),
+      trades: await tradeCount(),
+      news: await newsCount(),
+    });
   }
 
   return json(res, 404, { ok: false, error: 'not found' });
@@ -646,6 +729,8 @@ wss.on('connection', (socket) => {
 
 server.listen(PORT, HOST, () => {
   console.log(`[tv-bridge] FxOrbit TradingView bridge listening on http://${HOST}:${PORT}`);
-  console.log(`[tv-bridge] REST: /api/status /api/quote /api/candles /api/news?token=…`);
+  console.log('[tv-bridge] REST: /api/status /api/quote /api/candles /api/news?token=…');
+  console.log('[tv-bridge] DB:   /api/trades (GET/POST) /api/news/archive /api/db/stats');
   console.log('[tv-bridge] WS: /ws  { type: "subscribe", symbols, tfs }');
+  void initDb();
 });

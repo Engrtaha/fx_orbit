@@ -96,3 +96,27 @@ describe('trade lifecycle', () => {
     expect(stats.winRate).toBe(Math.round((wins / closed.length) * 100));
   });
 });
+
+describe('PostgreSQL hydration', () => {
+  it('starts with an empty book — no generated demo trades', () => {
+    expect(engine.getTrades().every((t) => /^T-/.test(t.id))).toBe(true);
+  });
+
+  it('restores archived rows, re-arms open trades and keeps ids unique', () => {
+    const n = engine.loadTrades([
+      { id: 'T-120', symbol: 'XAU/USD', side: 'BUY', status: 'open', lots: 0.1, entry: 3000, sl: 2980, tp: 3050, openedAt: 1760000000000 },
+      { id: 'T-121', symbol: 'XAU/USD', side: 'SELL', status: 'closed', lots: 0.1, entry: 3000, sl: 3020, tp: 2950, exit: 2950, pips: 50, pnl: 50, exitReason: 'TP Hit', openedAt: 1759999000000, closedAt: 1760000000000 },
+      { id: 'bogus' }, // incomplete rows are ignored
+    ]);
+    expect(n).toBe(2);
+
+    const restored = engine.getTrades().find((t) => t.id === 'T-120');
+    expect(restored.openTick).toBe(engine.tickCount); // not instantly time-stopped
+    expect(engine.tradeSeq).toBe(121);
+
+    const fresh = engine.openTrade({ symbol: 'XAU/USD', side: 'BUY', slPips: 10, tpPips: 20 });
+    expect(fresh.id).toBe('T-122');
+    engine.closeTrade(fresh, engine.getState('XAU/USD').mid, 'cleanup');
+    expect(engine.loadTrades([])).toBe(0); // nothing to restore leaves the book alone
+  });
+});

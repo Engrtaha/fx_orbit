@@ -143,10 +143,8 @@ class MarketEngine {
       const def = this.defs.get(sym);
       if (def && !this.states.has(sym)) this.states.set(sym, this.createState(def));
     }
-    this.seedTrades();
     if (!this.timer) this.timer = setInterval(() => this.tick(), 900);
   }
-
   applyUniverse(symbols) {
     const next = new Set(symbols);
     for (const sym of [...this.states.keys()]) {
@@ -460,56 +458,30 @@ class MarketEngine {
   }
 
   // ── Trade manager ──────────────────────────────────────────────────────────
-  seedTrades() {
-    const rng = seededRand(0xF0E1);
-    const syms = [...this.states.keys()];
-    if (!syms.length) return;
-    const sources = ['Manual', 'AI Signal', 'Strategy'];
-    const now = Date.now();
-    for (let i = 0; i < 45; i++) {
-      const sym = syms[Math.floor(rng() * syms.length)];
-      const s = this.states.get(sym);
-      const side = rng() > 0.5 ? 'BUY' : 'SELL';
-      const ageH = 4 + rng() * 230;
-      const entry = s.mid * (1 + (rng() - 0.5) * 0.012);
-      const atr = s.mid * s.vol * 60;
-      const slDist = atr * (0.9 + rng() * 0.8);
-      const win = rng() < 0.58;
-      const exitDist = win ? slDist * (0.6 + rng() * 1.6) : slDist * (0.35 + rng() * 0.6);
-      const dir = side === 'BUY' ? 1 : -1;
-      const exit = win ? entry + dir * exitDist : entry - dir * exitDist;
-      const openedAt = now - ageH * 3600 * 1000;
-      const closedAt = openedAt + (0.4 + rng() * 0.55) * ageH * 3600 * 1000;
-      const pips = (exit - entry) * dir / s.pip;
-      const trade = {
-        id: `S-${String(++this.tradeSeq).padStart(3, '0')}`,
-        symbol: sym, side, lots: 0.1, entry, sl: entry - dir * slDist, tp: entry + dir * slDist * 1.75,
-        openedAt, openTick: 0,
-        source: sources[Math.floor(rng() * sources.length)],
-        strategyId: null,
-        status: 'closed', exit, closedAt,
-        pnl: pips * (0.1 / 0.1),
-        pips: +pips.toFixed(1),
-        exitReason: win ? (rng() > 0.35 ? 'TP Hit' : 'Manual Close') : (rng() > 0.5 ? 'SL Hit' : 'Manual Close'),
-      };
-      this.trades.push(trade);
-    }
-    for (let i = 0; i < 3; i++) {
-      const sym = syms[Math.floor(rng() * syms.length)];
-      const s = this.states.get(sym);
-      const side = rng() > 0.5 ? 'BUY' : 'SELL';
-      const dir = side === 'BUY' ? 1 : -1;
-      const entry = s.mid * (1 + (rng() - 0.5) * 0.002);
-      const atr = s.mid * s.vol * 60;
-      this.trades.push({
-        id: `S-${String(++this.tradeSeq).padStart(3, '0')}`,
-        symbol: sym, side, lots: 0.1, entry,
-        sl: entry - dir * atr, tp: entry + dir * atr * 1.75,
-        openedAt: now - rng() * 2 * 3600 * 1000, openTick: this.tickCount,
-        source: 'Manual', strategyId: null, status: 'open',
+  // The book starts empty and is restored from PostgreSQL on boot (see
+  // src/data/persistence.js); there is no generated demo history.
+  loadTrades(rows) {
+    const incoming = (rows ?? []).filter((r) => r?.id && r.symbol && r.side && r.status);
+    if (!incoming.length) return 0;
+    const byId = new Map();
+    for (const r of incoming) {
+      byId.set(r.id, {
+        ...r,
+        lots: r.lots ?? 0.1,
+        // A restored open trade must get a fresh time-stop window, not be
+        // closed as "Time Stop" on the first tick after hydration.
+        openTick: r.status === 'open' ? this.tickCount : 0,
       });
     }
-    this.trades.sort((a, b) => (b.closedAt ?? b.openedAt) - (a.closedAt ?? a.openedAt));
+    for (const t of this.trades) if (!byId.has(t.id)) byId.set(t.id, t);
+    this.trades = [...byId.values()]
+      .sort((a, b) => (b.closedAt ?? b.openedAt ?? 0) - (a.closedAt ?? a.openedAt ?? 0));
+    for (const t of this.trades) {
+      const m = /^T-(\d+)$/.exec(String(t.id));
+      if (m && Number(m[1]) > this.tradeSeq) this.tradeSeq = Number(m[1]);
+    }
+    this.emit();
+    return incoming.length;
   }
 
   openTrade({ symbol, side, source = 'Manual', strategyId = null, slPips, tpPips, note = null }) {
