@@ -1,8 +1,17 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Zap, ChevronDown, ArrowDownRight, ArrowUpRight, Loader2, Minus } from 'lucide-react';
+import {
+  Zap, ChevronDown, ArrowDownRight, ArrowUpRight, Loader2, Minus, Radio, History,
+} from 'lucide-react';
 import { engine, fmt, TIMEFRAMES } from '../data/marketEngine';
 import { loadSettings } from '../data/settings';
-import { generateAiSignal } from '../data/signalEngine';
+import {
+  generateAiSignal, saveSignal, activeSignals, recentOutcomes, subscribeSignals, signalProgress,
+} from '../data/signalEngine';
+
+const ago = (ts) => {
+  const m = Math.max(1, Math.round((Date.now() - ts) / 60000));
+  return m < 60 ? `${m}m ago` : `${Math.round(m / 60)}h ago`;
+};
 
 export default function SignalsPage() {
   const [pairs, setPairs] = useState(() => engine.getSnapshot());
@@ -15,8 +24,13 @@ export default function SignalsPage() {
   const [mode, setMode] = useState('my');
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState(null);
+  const [, setSigV] = useState(0);
 
   useEffect(() => engine.subscribe(setPairs), []);
+  useEffect(() => subscribeSignals(() => setSigV((v) => v + 1)), []);
+
+  const liveSigs = activeSignals();
+  const outcomes = recentOutcomes(6);
 
   const strategyName = settings.activeStrategy || 'AI Best';
   const subtitleStrategy = mode === 'my' ? strategyName : 'AI Best Strategy';
@@ -43,11 +57,18 @@ export default function SignalsPage() {
   };
 
   const generate = async () => {
-    if (!state) return;
+    if (!state || busy) return;
     setBusy(true);
     try {
-      const r = await generateAiSignal(pair, tf, strategyRules());
-      if (r) setResult({ ...r, mode });
+      const rules = strategyRules();
+      const r = await generateAiSignal(pair, tf, rules);
+      if (r) {
+        const enriched = { ...r, strategyRules: rules?.rules ?? null };
+        if (enriched.side !== 'WAIT' && enriched.sl != null && enriched.tp != null) {
+          saveSignal(enriched, mode);
+        }
+        setResult({ ...enriched, mode });
+      }
     } finally {
       setBusy(false);
     }
@@ -91,8 +112,74 @@ export default function SignalsPage() {
         </button>
       </section>
 
+      <section className="panel sig-active rise" style={{ animationDelay: '80ms' }}>
+        <div className="panel-head">
+          <span className="panel-title"><Radio size={14} /> Active signals</span>
+          <span className="panel-sub">{liveSigs.length} live · held to TP/SL, then regenerated</span>
+        </div>
+        {liveSigs.length === 0 && (
+          <p className="sig-note">
+            No active signals right now. Generate one above — it stays live here and on the chart
+            until its TP or SL is hit, then the desk generates the next signal for that pair.
+          </p>
+        )}
+        {liveSigs.map((sig) => {
+          const prog = signalProgress(sig);
+          const SideIcon = sig.side === 'LONG' ? ArrowUpRight : ArrowDownRight;
+          const toTp = prog.mid == null ? null : (Math.abs(sig.tp - prog.mid) / prog.pip).toFixed(1);
+          const toSl = prog.mid == null ? null : (Math.abs(sig.sl - prog.mid) / prog.pip).toFixed(1);
+          return (
+            <div className="sig-row" key={sig.id}>
+              <div className="sig-row-head">
+                <span className={`ot-side sm ${sig.side === 'LONG' ? 'up' : 'dn'}`}>
+                  <SideIcon size={13} /><b>{sig.side}</b>
+                </span>
+                <b className="sig-row-sym">{sig.symbol}</b>
+                <span className="panel-sub">
+                  {sig.tf} · {sig.mode === 'my' ? 'my strategy' : 'AI best'} · R:R {sig.rr}
+                </span>
+                <span className={`num ${prog.pips >= 0 ? 'up' : 'down'}`} style={{ marginLeft: 'auto' }}>
+                  {prog.pips >= 0 ? '+' : ''}{prog.pips} pips
+                </span>
+              </div>
+              <div className="ot-levels">
+                <div className="ot-box">
+                  <span>Entry</span>
+                  <b>{fmt(sig.entry, sig.decimals)}</b>
+                </div>
+                <div className="ot-box">
+                  <span>Stop Loss</span>
+                  <b className="dn">{fmt(sig.sl, sig.decimals)}</b>
+                </div>
+                <div className="ot-box">
+                  <span>Take Profit</span>
+                  <b className="up">{fmt(sig.tp, sig.decimals)}</b>
+                </div>
+              </div>
+              <div className="sig-prog"><i style={{ width: `${Math.round(prog.frac * 100)}%` }} /></div>
+              <div className="sig-row-foot">
+                {toTp != null && <span>to TP {toTp}p</span>}
+                {toSl != null && <span>to SL {toSl}p</span>}
+                <span>opened {ago(sig.createdAt)}</span>
+                <span>{prog.mid != null ? `live ${fmt(prog.mid, prog.decimals)}` : 'price unavailable'}</span>
+              </div>
+            </div>
+          );
+        })}
+        {outcomes.length > 0 && (
+          <div className="sig-outcomes">
+            <span className="sig-outcomes-k"><History size={11} /> recent results</span>
+            {outcomes.map((o) => (
+              <span key={`${o.id}-${o.closedAt}`} className={`sig-outcome ${o.status}`}>
+                {o.symbol} {o.status.toUpperCase()} {o.pips >= 0 ? '+' : ''}{o.pips}p · {ago(o.closedAt)}
+              </span>
+            ))}
+          </div>
+        )}
+      </section>
+
       {result && (
-        <section className="panel open-trade rise">
+        <section className="panel open-trade rise" style={{ animationDelay: '140ms' }}>
           <div className="panel-head">
             <span className="panel-title">Open Trade — {result.symbol}</span>
             <span className="panel-sub">

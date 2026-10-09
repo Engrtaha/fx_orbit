@@ -21,7 +21,7 @@ function emaSeries(candles, period) {
   });
 }
 
-export default function PriceChart({ pair, symbol, tf, onTfChange }) {
+export default function PriceChart({ pair, symbol, tf, onTfChange, signal }) {
   const containerRef = useRef(null);
   const chartRef = useRef(null);
   const candleRef = useRef(null);
@@ -172,6 +172,23 @@ export default function PriceChart({ pair, symbol, tf, onTfChange }) {
     return unsub;
   }, [symbol]);
 
+  // active trade-signal levels: entry / SL / TP as dashed price lines with
+  // axis labels, removed as soon as the signal closes or the pair switches
+  useEffect(() => {
+    const cs = candleRef.current;
+    if (!cs) return undefined;
+    const lines = [];
+    if (signal && signal.symbol === symbol) {
+      const mk = (price, color, title) => cs.createPriceLine({
+        price, color, lineWidth: 1, lineStyle: 2, axisLabelVisible: true, title,
+      });
+      lines.push(mk(signal.entry, 'rgba(34, 211, 238, 0.85)', 'ENTRY'));
+      lines.push(mk(signal.sl, 'rgba(251, 75, 106, 0.9)', 'SL'));
+      lines.push(mk(signal.tp, 'rgba(45, 212, 167, 0.9)', 'TP'));
+    }
+    return () => lines.forEach((l) => cs.removePriceLine(l));
+  }, [signal, symbol]);
+
   return (
     <section className="panel chart-panel rise" style={{ animationDelay: '120ms' }}>
       <div className="chart-head">
@@ -237,6 +254,15 @@ export default function PriceChart({ pair, symbol, tf, onTfChange }) {
           <Activity size={11} />
           {symbol} · {tf} · Volatility {fmt(volatilityPips(pair), 1)} pips
         </div>
+        {signal && (
+          <div className="chart-sig" style={{ position: 'absolute', top: 28, left: 14, zIndex: 3, pointerEvents: 'none' }}>
+            <span className={`chart-sig-side ${signal.side === 'LONG' ? 'up' : 'dn'}`}>{signal.side}</span>
+            <span>active signal</span>
+            <b>E {fmt(signal.entry, signal.decimals)}</b>
+            <b className="up">TP {fmt(signal.tp, signal.decimals)}</b>
+            <b className="dn">SL {fmt(signal.sl, signal.decimals)}</b>
+          </div>
+        )}
       </div>
     </section>
   );

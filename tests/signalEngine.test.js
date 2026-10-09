@@ -1,5 +1,14 @@
 import { describe, expect, it } from 'vitest';
-import { normalizeSignal } from '../src/data/signalEngine';
+import { seedStorage } from './setup.js';
+
+// Seed before importing: the engine constructor and loadSettings read localStorage.
+seedStorage({ pairs: ['US100', 'XAU/USD', 'EUR/USD'], defaultPair: 'US100' });
+const { engine } = await import('../src/data/marketEngine.js');
+const mod = await import('../src/data/signalEngine.js');
+
+engine.start();
+clearInterval(engine.timer);
+engine.timer = null; // keep prices frozen so assertions stay deterministic
 
 const pip = 0.0001;
 const makeState = (over = {}) => ({
@@ -18,9 +27,24 @@ const makeState = (over = {}) => ({
 });
 // 20 candles × (high-low)=0.002 → volatility = 20 pips per bar.
 
+const sigResult = (symbol, side, entry, slPips, tpPips) => {
+  const s = engine.getState(symbol);
+  const dir = side === 'LONG' ? 1 : -1;
+  return {
+    symbol, tf: '15m', side, entry,
+    sl: entry - dir * slPips * s.pip,
+    tp: entry + dir * tpPips * s.pip,
+    slPips, tpPips,
+    rr: +(tpPips / slPips).toFixed(2),
+    confidence: 60,
+    summary: 'test signal',
+    decimals: s.decimals,
+  };
+};
+
 describe('normalizeSignal', () => {
   it('builds a LONG signal with engine-valid levels and rr', () => {
-    const out = normalizeSignal({ side: 'LONG', confidence: 72, slPips: 24, tpPips: 40, reasons: ['RSI 58 bullish', 'momentum rising'], summary: 'Momentum supports longs.' }, makeState(), '15m');
+    const out = mod.normalizeSignal({ side: 'LONG', confidence: 72, slPips: 24, tpPips: 40, reasons: ['RSI 58 bullish', 'momentum rising'], summary: 'Momentum supports longs.' }, makeState(), '15m');
     expect(out.side).toBe('LONG');
     expect(out.confidence).toBe(72);
     expect(out.slPips).toBe(24);
@@ -31,13 +55,13 @@ describe('normalizeSignal', () => {
   });
 
   it('mirrors direction for SHORT — sl above entry, tp below', () => {
-    const out = normalizeSignal({ side: 'SHORT', slPips: 30, tpPips: 45 }, makeState(), '5m');
+    const out = mod.normalizeSignal({ side: 'SHORT', slPips: 30, tpPips: 45 }, makeState(), '5m');
     expect(out.sl).toBeCloseTo(1.085 + 30 * pip, 5);
     expect(out.tp).toBeCloseTo(1.085 - 45 * pip, 5);
   });
 
   it('keeps WAIT as a levelless signal', () => {
-    const out = normalizeSignal({ side: 'WAIT', confidence: 30, slPips: 99, tpPips: 99 }, makeState(), '15m');
+    const out = mod.normalizeSignal({ side: 'WAIT', confidence: 30, slPips: 99, tpPips: 99 }, makeState(), '15m');
     expect(out.side).toBe('WAIT');
     expect(out.sl).toBeNull();
     expect(out.tp).toBeNull();
@@ -45,20 +69,93 @@ describe('normalizeSignal', () => {
   });
 
   it('falls back to the engine score when the side is invalid', () => {
-    expect(normalizeSignal({ side: 'buy' }, makeState({ score: 2 }), '15m').side).toBe('LONG');
-    expect(normalizeSignal({}, makeState({ score: -2 }), '15m').side).toBe('SHORT');
-    expect(normalizeSignal({}, makeState({ score: 0 }), '15m').side).toBe('WAIT');
+    expect(mod.normalizeSignal({ side: 'buy' }, makeState({ score: 2 }), '15m').side).toBe('LONG');
+    expect(mod.normalizeSignal({}, makeState({ score: -2 }), '15m').side).toBe('SHORT');
+    expect(mod.normalizeSignal({}, makeState({ score: 0 }), '15m').side).toBe('WAIT');
   });
 
   it('clamps stops and targets to the instrument volatility', () => {
-    const out = normalizeSignal({ side: 'LONG', slPips: 500, tpPips: 5 }, makeState(), '15m');
+    const out = mod.normalizeSignal({ side: 'LONG', slPips: 500, tpPips: 5 }, makeState(), '15m');
     expect(out.slPips).toBeLessThanOrEqual(20 * 3.5);
     expect(out.tpPips).toBeGreaterThanOrEqual(out.slPips * 1.1);
   });
 
   it('clamps confidence and caps reasons at 3', () => {
-    const out = normalizeSignal({ side: 'LONG', confidence: 250, reasons: ['a', 'b', 'c', 'd', 'e'] }, makeState(), '15m');
+    const out = mod.normalizeSignal({ side: 'LONG', confidence: 250, reasons: ['a', 'b', 'c', 'd', 'e'] }, makeState(), '15m');
     expect(out.confidence).toBe(99);
     expect(out.reasons).toHaveLength(3);
+  });
+});
+
+describe('active signal lifecycle', () => {
+  it('stores tradable signals, one per symbol, and skips WAIT', () => {
+    expect(mod.saveSignal({ side: 'WAIT', sl: null, tp: null, symbol: 'US100' }, 'ai')).toBeNull();
+
+    const s = engine.getState('US100');
+    const first = mod.saveSignal(sigResult('US100', 'LONG', s.mid, 1000, 1000), 'ai');
+    const again = mod.saveSignal(sigResult('US100', 'SHORT', s.mid, 1000, 1000), 'my');
+    mod.saveSignal(sigResult('XAU/USD', 'LONG', engine.getState('XAU/USD').mid, 1000, 1000), 'ai');
+
+    expect(mod.activeSignals()).toHaveLength(2);
+    expect(mod.activeSignalFor('US100').id).toBe(again.id);
+    expect(mod.activeSignalFor('US100').id).not.toBe(first.id);
+    expect(mod.activeSignalFor('US100').side).toBe('SHORT');
+    expect(mod.activeSignalFor('US100').mode).toBe('my');
+    expect(JSON.parse(localStorage.getItem('fxorbit-signals')).active).toHaveLength(2);
+  });
+
+  it('keeps a signal open while price stays between SL and TP', async () => {
+    const before = mod.activeSignals().length;
+    await mod.tickSignals();
+    expect(mod.activeSignals()).toHaveLength(before);
+    expect(mod.recentOutcomes(10).filter((o) => o.symbol === 'US100')).toHaveLength(0);
+  });
+
+  it('closes a LONG at TP, records the outcome and regenerates the next signal', async () => {
+    const st = engine.getState('XAU/USD');
+    st.score = 2; // deterministic LONG for the engine-fallback regeneration
+    const plan = sigResult('XAU/USD', 'LONG', st.mid, 50, 80);
+    const oldId = mod.saveSignal(plan, 'ai').id;
+
+    st.mid = plan.tp + 10 * st.pip; // gap through take profit
+    await mod.tickSignals();
+
+    const hit = mod.recentOutcomes(10).find((o) => o.symbol === 'XAU/USD' && o.status === 'tp');
+    expect(hit).toBeDefined();
+    expect(hit.pips).toBe(80);
+    expect(hit.exitPrice).toBeCloseTo(plan.tp + 10 * st.pip, 6);
+
+    const next = mod.activeSignalFor('XAU/USD');
+    expect(next).not.toBeNull();
+    expect(next.id).not.toBe(oldId);
+    expect(next.entry).toBeCloseTo(st.mid, 6);
+  });
+
+  it('closes a SHORT at SL and books the loss', async () => {
+    const st = engine.getState('EUR/USD');
+    st.score = -2; // deterministic SHORT for the regeneration
+    const plan = sigResult('EUR/USD', 'SHORT', st.mid, 40, 60);
+    mod.saveSignal(plan, 'ai');
+
+    st.mid = plan.sl + 10 * st.pip; // gap through the stop
+    await mod.tickSignals();
+
+    const hit = mod.recentOutcomes(10).find((o) => o.symbol === 'EUR/USD' && o.status === 'sl');
+    expect(hit).toBeDefined();
+    expect(hit.pips).toBe(-40);
+    expect(mod.activeSignalFor('EUR/USD')).not.toBeNull();
+  });
+
+  it('reports live pips and the entry-to-target fraction', () => {
+    const st = engine.getState('US100');
+    const entry = st.mid;
+    mod.saveSignal(sigResult('US100', 'LONG', entry, 20, 20), 'ai');
+    st.mid = entry + 10 * st.pip; // halfway to target
+
+    const prog = mod.signalProgress(mod.activeSignalFor('US100'));
+    expect(prog.pips).toBeCloseTo(10, 1);
+    expect(prog.frac).toBeCloseTo(0.5, 5);
+
+    st.mid = entry; // restore so later ticks stay between levels
   });
 });

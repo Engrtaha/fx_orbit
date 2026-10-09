@@ -1234,3 +1234,35 @@ select.inp { appearance: none; cursor: pointer; }
 .nd-key .nd-key-actions { display: flex; gap: 8px; margin-top: 9px; }
 .nd-key .field-hint { display: block; margin-top: 6px; }
 .nd-key-sm { flex: 0 0 160px; }
+
+/* ── Active signal book (signals page) ─────────────────────────────────────── */
+.sig-active { margin-top: 14px; }
+.sig-row { padding: 13px 0 11px; border-top: 1px solid rgba(148, 163, 184, 0.08); }
+.sig-row:first-of-type { border-top: 0; padding-top: 4px; }
+.sig-row-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.ot-side.sm { min-width: 0; gap: 4px; font-size: 11px; padding: 3px 8px; border-radius: 6px; border: 1px solid currentColor; }
+.sig-row-sym { font-family: var(--disp); font-size: 14px; }
+.sig-row .ot-levels { margin-top: 10px; min-width: 0; gap: 10px; }
+.sig-row .ot-box b { font-size: 13px; }
+.sig-prog { height: 6px; margin-top: 11px; border-radius: 99px; background: rgba(148, 163, 184, 0.1); overflow: hidden; }
+.sig-prog i { display: block; height: 100%; border-radius: 99px; background: linear-gradient(90deg, var(--cyan), var(--green)); transition: width 0.35s ease; }
+.sig-row-foot { display: flex; gap: 16px; flex-wrap: wrap; margin-top: 8px; font-size: 11px; color: var(--faint); font-family: var(--mono); }
+.sig-outcomes { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 12px; padding-top: 12px; border-top: 1px dashed rgba(148, 163, 184, 0.14); }
+.sig-outcomes-k { display: inline-flex; align-items: center; gap: 5px; font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--faint); margin-right: 2px; }
+.sig-outcome { font-size: 11px; font-family: var(--mono); padding: 3px 10px; border-radius: 99px; }
+.sig-outcome.tp { color: var(--green); background: rgba(45, 212, 167, 0.1); border: 1px solid rgba(45, 212, 167, 0.28); }
+.sig-outcome.sl { color: var(--red); background: rgba(251, 75, 106, 0.1); border: 1px solid rgba(251, 75, 106, 0.28); }
+
+/* ── Active signal overlay (charts page) ───────────────────────────────────── */
+.chart-sig {
+  display: flex; align-items: center; gap: 8px; font-size: 10px; letter-spacing: 0.06em;
+  color: var(--faint); text-transform: uppercase; font-family: var(--mono);
+  background: rgba(11, 17, 32, 0.72); border: 1px solid rgba(148, 163, 184, 0.16);
+  border-radius: 8px; padding: 4px 10px; backdrop-filter: blur(6px);
+}
+.chart-sig b { font-weight: 600; color: var(--text); text-transform: none; letter-spacing: 0; }
+.chart-sig b.up { color: var(--green); }
+.chart-sig b.dn { color: var(--red); }
+.chart-sig-side { font-weight: 800; letter-spacing: 0.1em; }
+.chart-sig-side.up { color: var(--green); }
+.chart-sig-side.dn { color: var(--red); }

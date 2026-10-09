@@ -133,3 +133,128 @@ export async function generateAiSignal(symbol, tf, strategy) {
     return { ...fallback, aiError: String(err?.message ?? err) };
   }
 }
+
+// ── Active signal book ───────────────────────────────────────────────────────
+// A generated LONG/SHORT signal stays "active" until live price touches its
+// SL or TP. Active signals render on the Signals page and as level lines on
+// the Charts page; when one closes, the desk immediately generates a fresh
+// signal for the same instrument so the cycle keeps running.
+
+const SIGNALS_KEY = 'fxorbit-signals';
+const MAX_CLOSED = 20;
+
+let book = null;
+let ticking = false;
+const listeners = new Set();
+
+function loadBook() {
+  try {
+    const raw = localStorage.getItem(SIGNALS_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (parsed && Array.isArray(parsed.active)) {
+        return { active: parsed.active, closed: Array.isArray(parsed.closed) ? parsed.closed : [] };
+      }
+    }
+  } catch { /* corrupted or unavailable — start fresh */ }
+  return { active: [], closed: [] };
+}
+
+const state = () => (book ??= loadBook());
+
+function emit() {
+  try { localStorage.setItem(SIGNALS_KEY, JSON.stringify(book)); } catch { /* storage full/blocked */ }
+  listeners.forEach((fn) => fn());
+}
+
+export function subscribeSignals(fn) {
+  listeners.add(fn);
+  return () => listeners.delete(fn);
+}
+
+export function activeSignals() {
+  return state().active;
+}
+
+export function activeSignalFor(symbol) {
+  return state().active.find((s) => s.symbol === symbol) ?? null;
+}
+
+export function recentOutcomes(limit = 5) {
+  return state().closed.slice(0, limit);
+}
+
+export function saveSignal(result, mode = 'ai') {
+  if (!result || result.side === 'WAIT' || result.sl == null || result.tp == null) return null;
+  const sig = {
+    id: `SIG-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
+    symbol: result.symbol,
+    tf: result.tf,
+    side: result.side,
+    entry: result.entry,
+    sl: result.sl,
+    tp: result.tp,
+    slPips: result.slPips,
+    tpPips: result.tpPips,
+    rr: result.rr,
+    confidence: result.confidence,
+    summary: result.summary ?? '',
+    strategyRules: result.strategyRules ?? null,
+    mode,
+    decimals: result.decimals,
+    createdAt: Date.now(),
+  };
+  state().active = [...state().active.filter((s) => s.symbol !== sig.symbol), sig];
+  emit();
+  return sig;
+}
+
+async function regenerate(prev) {
+  if (!engine.getState(prev.symbol)) return;
+  const next = await generateAiSignal(prev.symbol, prev.tf, prev.strategyRules);
+  if (next && next.side !== 'WAIT' && next.sl != null && next.tp != null) {
+    saveSignal({ ...next, strategyRules: prev.strategyRules }, prev.mode);
+  }
+}
+
+async function closeSignal(sig, outcome, price) {
+  const st = state();
+  st.active = st.active.filter((s) => s.id !== sig.id);
+  st.closed = [
+    { ...sig, status: outcome, exitPrice: price, pips: outcome === 'tp' ? sig.tpPips : -sig.slPips, closedAt: Date.now() },
+    ...st.closed,
+  ].slice(0, MAX_CLOSED);
+  emit();
+  await regenerate(sig);
+}
+
+// Re-entry guarded: regeneration may call the model for seconds, and ticks
+// arrive on a 1s interval — overlapping runs would spam the provider.
+export async function tickSignals() {
+  if (ticking) return;
+  ticking = true;
+  try {
+    for (const sig of [...state().active]) {
+      const s = engine.getState(sig.symbol);
+      if (!s) continue;
+      const hitSl = sig.side === 'LONG' ? s.mid <= sig.sl : s.mid >= sig.sl;
+      const hitTp = sig.side === 'LONG' ? s.mid >= sig.tp : s.mid <= sig.tp;
+      if (hitSl) await closeSignal(sig, 'sl', s.mid);
+      else if (hitTp) await closeSignal(sig, 'tp', s.mid);
+    }
+  } finally {
+    ticking = false;
+  }
+}
+
+// Live progress of an active signal: pips in profit right now, plus a 0..1
+// fraction of the way from entry to target (used for the progress bar).
+export function signalProgress(sig) {
+  const s = engine.getState(sig.symbol);
+  if (!s) return { mid: null, pips: 0, frac: 0, pip: 1, decimals: 5 };
+  const dir = sig.side === 'LONG' ? 1 : -1;
+  const pips = ((s.mid - sig.entry) * dir) / s.pip;
+  const span = Math.abs(sig.tp - sig.entry) || 1;
+  const frac = Math.min(1, Math.max(0, ((s.mid - sig.entry) * dir) / span));
+  return { mid: s.mid, pips: +pips.toFixed(1), frac, pip: s.pip, decimals: s.decimals };
+}

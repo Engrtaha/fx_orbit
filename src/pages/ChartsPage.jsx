@@ -3,6 +3,7 @@ import { useLocation } from 'react-router-dom';
 import { CandlestickChart } from 'lucide-react';
 import { engine } from '../data/marketEngine';
 import { loadSettings } from '../data/settings';
+import { activeSignalFor, subscribeSignals } from '../data/signalEngine';
 import PriceChart from '../components/PriceChart';
 
 export default function ChartsPage() {
@@ -13,6 +14,7 @@ export default function ChartsPage() {
     return snap.some((s) => s.symbol === defaultPair) ? defaultPair : snap[0]?.symbol ?? 'EUR/USD';
   });
   const [tf, setTf] = useState('15m');
+  const [, setSigV] = useState(0);
   const location = useLocation();
   const [prevNavState, setPrevNavState] = useState(null);
 
@@ -24,8 +26,10 @@ export default function ChartsPage() {
   }
 
   useEffect(() => engine.subscribe(setPairs), []);
+  useEffect(() => subscribeSignals(() => setSigV((v) => v + 1)), []);
 
   const pair = useMemo(() => pairs.find((p) => p.symbol === symbol) ?? pairs[0], [pairs, symbol]);
+  const signal = pair ? activeSignalFor(pair.symbol) : null;
 
   if (!pair) return null;
 
@@ -48,7 +52,7 @@ export default function ChartsPage() {
         ))}
       </div>
 
-      <PriceChart pair={pair} symbol={pair.symbol} tf={tf} onTfChange={setTf} />
+      <PriceChart pair={pair} symbol={pair.symbol} tf={tf} onTfChange={setTf} signal={signal} />
     </div>
   );
 }
