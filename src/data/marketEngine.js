@@ -437,7 +437,7 @@ class MarketEngine {
     const side = s.score >= 1 ? 'LONG' : s.score <= -1 ? 'SHORT' : 'WAIT';
     const entry = s.mid;
     const slDist = 1.4 * atr;
-    const tpDist = 2.45 * atr;
+    const tpDist = 3.5 * atr;
     const sl = side === 'SHORT' ? entry + slDist : entry - slDist;
     const tp = side === 'SHORT' ? entry - tpDist : entry + tpDist;
     const slPips = slDist / s.pip;

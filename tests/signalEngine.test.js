@@ -43,21 +43,27 @@ const sigResult = (symbol, side, entry, slPips, tpPips) => {
 };
 
 describe('normalizeSignal', () => {
-  it('builds a LONG signal with engine-valid levels and rr', () => {
+  it('builds a LONG signal and lifts a thin target to the 2R minimum', () => {
     const out = mod.normalizeSignal({ side: 'LONG', confidence: 72, slPips: 24, tpPips: 40, reasons: ['RSI 58 bullish', 'momentum rising'], summary: 'Momentum supports longs.' }, makeState(), '15m');
     expect(out.side).toBe('LONG');
     expect(out.confidence).toBe(72);
     expect(out.slPips).toBe(24);
-    expect(out.tpPips).toBe(40);
-    expect(out.rr).toBeCloseTo(1.67, 1);
+    expect(out.tpPips).toBe(48); // 40 was only 1.67R — lifted to the floor
+    expect(out.rr).toBeCloseTo(2, 2);
     expect(out.sl).toBeCloseTo(1.085 - 24 * pip, 5);
-    expect(out.tp).toBeCloseTo(1.085 + 40 * pip, 5);
+    expect(out.tp).toBeCloseTo(1.085 + 48 * pip, 5);
+  });
+
+  it('defaults the target to 2.5x the stop when the model omits it', () => {
+    const out = mod.normalizeSignal({ side: 'LONG', slPips: 20 }, makeState(), '15m');
+    expect(out.tpPips).toBeCloseTo(50, 1);
+    expect(out.rr).toBeCloseTo(2.5, 2);
   });
 
   it('mirrors direction for SHORT — sl above entry, tp below', () => {
-    const out = mod.normalizeSignal({ side: 'SHORT', slPips: 30, tpPips: 45 }, makeState(), '5m');
+    const out = mod.normalizeSignal({ side: 'SHORT', slPips: 30, tpPips: 75 }, makeState(), '5m');
     expect(out.sl).toBeCloseTo(1.085 + 30 * pip, 5);
-    expect(out.tp).toBeCloseTo(1.085 - 45 * pip, 5);
+    expect(out.tp).toBeCloseTo(1.085 - 75 * pip, 5);
   });
 
   it('keeps WAIT as a levelless signal', () => {

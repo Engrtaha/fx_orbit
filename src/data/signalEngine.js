@@ -18,7 +18,7 @@ const SIGNAL_SYSTEM = [
   '{"side":"LONG|SHORT|WAIT","confidence":0-100,"slPips":12.5,"tpPips":22,',
   '"reasons":["max 3 short reasons citing the given stats"],"summary":"one sentence"}',
   'Rules: side LONG means buy, SHORT means sell. Use WAIT when the evidence conflicts or the spread/volatility makes the trade poor.',
-  'slPips/tpPips are in pips: scale the stop from volatilityPips (roughly 1-2x) and target at least 1.3x the stop. For indices 1 pip = 1 point.',
+  'slPips/tpPips are in pips: scale the stop from volatilityPips (roughly 1-2x) and target at least 2.5x the stop. For indices 1 pip = 1 point.',
   'Confidence reflects how strongly the evidence supports the side; a WAIT signal gets low confidence.',
   'Never invent figures that are not derivable from the given stats.',
 ].join(' ');
@@ -88,7 +88,7 @@ export function normalizeSignal(raw, s, tf) {
 
   const vol = Math.max(volatilityPips(s), s.spread * 2, 4);
   const slPips = clamp(num(raw?.slPips) ?? vol * 1.4, vol * 0.5, vol * 3.5);
-  const tpPips = clamp(num(raw?.tpPips) ?? slPips * 1.75, slPips * 1.1, slPips * 6);
+  const tpPips = clamp(num(raw?.tpPips) ?? slPips * 2.5, slPips * 2, slPips * 6);
   const dir = side === 'LONG' ? 1 : -1;
   const entry = s.mid;
   return {
