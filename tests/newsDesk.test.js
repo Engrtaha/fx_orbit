@@ -9,6 +9,7 @@ const mod = await import('../src/data/newsEngine.js');
 engine.start();
 clearInterval(engine.timer);
 engine.timer = null; // keep prices frozen so assertions stay deterministic
+engine.markAllTv(true); // the desk only places trades on a live feed
 
 const now = () => Math.floor(Date.now() / 1000);
 const headline = (over = {}) => ({

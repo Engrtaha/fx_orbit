@@ -487,6 +487,9 @@ class MarketEngine {
   openTrade({ symbol, side, source = 'Manual', strategyId = null, slPips, tpPips, note = null }) {
     const s = this.states.get(symbol);
     if (!s) return null;
+    // Without the bridge the engine is a random walk, and those fills would sit
+    // in the archived book forever and drag the balance with them.
+    if (!s.tv) return null;
     const dir = side === 'BUY' ? 1 : -1;
     const entry = s.mid;
     const sl = entry - dir * slPips * s.pip;

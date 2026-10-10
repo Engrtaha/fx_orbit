@@ -8,6 +8,7 @@ const { UNIVERSE } = await import('../src/data/settings.js');
 engine.start();
 clearInterval(engine.timer);
 engine.timer = null; // no background ticks — tests drive prices themselves
+engine.markAllTv(true); // positions require a live feed; these tests stand in for it
 
 describe('engine universe', () => {
   it('instantiates only the enabled pairs while keeping the full universe', () => {
@@ -47,6 +48,17 @@ describe('trade lifecycle', () => {
     expect(t.tp).toBeCloseTo(s.mid + 20 * s.pip, 12);
     expect(engine.openTrade({ symbol: 'NOPE', side: 'BUY', slPips: 5, tpPips: 10 })).toBeNull();
     engine.closeTrade(t, s.mid, 'Manual cleanup');
+  });
+
+  it('refuses to open a position while the feed is simulated', () => {
+    const s = engine.getState('XAU/USD');
+    engine.setTvLive('XAU/USD', false);
+    expect(engine.openTrade({ symbol: 'XAU/USD', side: 'BUY', slPips: 10, tpPips: 20 })).toBeNull();
+
+    engine.setTvLive('XAU/USD', true);
+    const live = engine.openTrade({ symbol: 'XAU/USD', side: 'BUY', slPips: 10, tpPips: 20 });
+    expect(live).not.toBeNull();
+    engine.closeTrade(live, s.mid, 'Manual cleanup');
   });
 
   it('closes BUY trades at take profit with pip accounting', () => {
