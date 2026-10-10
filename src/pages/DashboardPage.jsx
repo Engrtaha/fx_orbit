@@ -2,10 +2,10 @@ import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { DollarSign, TrendingUp, Percent, Target } from 'lucide-react';
 import { engine, fmt } from '../data/marketEngine';
-import { loadSettings, subscribeSettings } from '../data/settings';
+import { loadSettings, subscribeSettings, accountBalance } from '../data/settings';
 
-const money = (v) => `$${Math.abs(v).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-const signed = (v) => `${v >= 0 ? '+' : '-'}${money(v)}`;
+const money = (v) => `${v < 0 ? '-' : ''}$${Math.abs(v).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+const signed = (v) => `${v >= 0 ? '+' : ''}${money(v)}`;
 
 const SESSION_BARS = [
   { name: 'Asia', utc: [0, 9], color: '#8b5cf6' },
@@ -63,7 +63,7 @@ export default function DashboardPage() {
     return () => { unsub(); unsubSettings(); clearInterval(t); };
   }, []);
 
-  const balance = +settings.initialBalance + stats.netPnl + (+settings.balanceAdjust || 0);
+  const balance = accountBalance(settings, stats.netPnl);
   const total = stats.wins + stats.losses;
   const winRate = total ? Math.round((stats.wins / total) * 100) : 0;
   const maxDay = Math.max(...stats.daily.map(Math.abs), 1);

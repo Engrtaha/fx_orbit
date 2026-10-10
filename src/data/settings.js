@@ -74,7 +74,6 @@ const defaults = {
   riskPerTrade: 2,
   defaultPair: 'XAU/USD',
   initialBalance: 100,
-  balanceAdjust: 0,
   activeStrategy: '',
   activeStrategyData: null,
   tvEnabled: false,
@@ -99,6 +98,12 @@ export function loadSettings() {
     return { ...defaults };
   }
 }
+
+// The whole account model in one place, so Portfolio and Dashboard can never
+// disagree: initial balance is the user's anchor and only realized trade P&L
+// (TP/SL hits) moves the balance from it.
+export const accountBalance = (s, realizedPnl = 0) =>
+  +(((Number(s?.initialBalance) || 0) + (Number(realizedPnl) || 0)).toFixed(2));
 
 const listeners = new Set();
 

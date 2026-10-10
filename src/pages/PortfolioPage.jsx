@@ -1,10 +1,10 @@
 import { useEffect, useState } from 'react';
 import { Pencil, Save, X, Check } from 'lucide-react';
 import { engine, fmt } from '../data/marketEngine';
-import { loadSettings, saveSettings, subscribeSettings } from '../data/settings';
+import { loadSettings, saveSettings, subscribeSettings, accountBalance } from '../data/settings';
 
-const money = (v) => `$${Math.abs(v).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-const signed = (v) => `${v >= 0 ? '+' : '-'}${money(v)}`;
+const money = (v) => `${v < 0 ? '-' : ''}$${Math.abs(v).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+const signed = (v) => `${v >= 0 ? '+' : ''}${money(v)}`;
 
 function computeStats() {
   const trades = engine.getTrades();
@@ -75,22 +75,23 @@ export default function PortfolioPage() {
   const [settings, setSettings] = useState(() => loadSettings());
   const [stats, setStats] = useState(computeStats);
   const [editing, setEditing] = useState(false);
-  const [draft, setDraft] = useState({ balance: 0, initialBalance: 100, riskPerTrade: 2, defaultPair: 'XAU/USD' });
+  const [draft, setDraft] = useState({ initialBalance: 100, riskPerTrade: 2, defaultPair: 'XAU/USD' });
   const [toast, setToast] = useState(null);
 
   useEffect(() => engine.subscribe(() => setStats(computeStats())), []);
   useEffect(() => subscribeSettings(setSettings), []);
 
   const baseInitial = +settings.initialBalance;
-  const liveBalance = baseInitial + stats.netPnl + (+settings.balanceAdjust || 0);
   const previewInitial = editing ? Math.max(0, +draft.initialBalance || 0) : baseInitial;
-  const balance = editing ? Math.max(0, +draft.balance || 0) : liveBalance;
-  const totalPnl = balance - previewInitial;
+  // Balance is never typed in: it is the user's anchor plus realized P&L, so it
+  // only moves when a trade hits TP or SL. While editing it previews the anchor
+  // being typed so the effect is visible before saving.
+  const balance = accountBalance({ initialBalance: previewInitial }, stats.netPnl);
+  const totalPnl = stats.netPnl;
   const enabled = engine.getSnapshot();
 
   const startEdit = () => {
     setDraft({
-      balance: liveBalance.toFixed(2),
       initialBalance: settings.initialBalance,
       riskPerTrade: settings.riskPerTrade,
       defaultPair: settings.defaultPair,
@@ -101,13 +102,7 @@ export default function PortfolioPage() {
   const saveAccount = () => {
     const initial = Math.max(0, +draft.initialBalance || 0);
     const risk = Math.min(100, Math.max(0.1, +draft.riskPerTrade || 1));
-    const target = Math.max(0, +draft.balance || 0);
-    saveSettings({
-      initialBalance: initial,
-      riskPerTrade: risk,
-      defaultPair: draft.defaultPair,
-      balanceAdjust: +(target - initial - stats.netPnl).toFixed(2),
-    });
+    saveSettings({ initialBalance: initial, riskPerTrade: risk, defaultPair: draft.defaultPair });
     setEditing(false);
     setToast('Portfolio updated');
     setTimeout(() => setToast(null), 2200);
@@ -148,12 +143,6 @@ export default function PortfolioPage() {
         <section className="panel settings-section pf-edit rise">
           <div className="field-row">
             <div className="field">
-              <label>Balance ($)</label>
-              <input className="inp" type="number" min="0" step="0.01"
-                value={draft.balance}
-                onChange={(e) => setDraft({ ...draft, balance: e.target.value })} />
-            </div>
-            <div className="field">
               <label>Initial Balance ($)</label>
               <input className="inp" type="number" min="0" step="1"
                 value={draft.initialBalance}
@@ -173,6 +162,11 @@ export default function PortfolioPage() {
               </select>
             </div>
           </div>
+          <p className="field-hint">
+            Balance is not editable — it is your initial balance plus realized trade P&amp;L:
+            {' '}{money(previewInitial)} + {signed(stats.netPnl)} = <b>{money(balance)}</b>.
+            After saving it moves only as trades hit TP or SL.
+          </p>
           <div className="btn-row">
             <button className="btn primary" onClick={saveAccount}><Save size={14} /> Save Changes</button>
           </div>
