@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Search, Globe } from 'lucide-react';
-import { SESSIONS, fmt, sessionOpen } from '../data/marketEngine';
+import { Search, Globe, Moon } from 'lucide-react';
+import { SESSIONS, fmt, marketClosed, reopenLabel, sessionOpen } from '../data/marketEngine';
 import { getTvStatus, subscribeTvStatus } from '../data/tvClient';
 import { Badges, Delta } from './shared';
 
@@ -22,13 +22,16 @@ export default function TopBar({ pairs, selected, eyebrow = 'FxOrbit Terminal', 
   // The badge used to be decoration; it has to report the feed the prices
   // actually came from, otherwise a dead bridge looks like a live terminal.
   const live = pairs.some((p) => p.tv);
-  const feedHint = live
-    ? `TradingView bridge is streaming quotes on ${tv.url}`
-    : tv.state === 'connecting' || tv.state === 'open'
-      ? `Bridge reachable at ${tv.url} — waiting for the first candles`
-      : tv.state === 'idle'
-        ? 'Live feed is off — turn on TradingView in Settings to stream real quotes'
-        : `Bridge unreachable at ${tv.url || 'the configured URL'} — prices are simulated. Run npm run dev, or fix the backend URL in Settings.`;
+  const closed = marketClosed();
+  const feedHint = closed.closed
+    ? `Market is closed for the weekend — the tape holds Friday's last print. It reopens ${reopenLabel(closed.reopensAt)}.`
+    : live
+      ? `TradingView bridge is streaming quotes on ${tv.url}`
+      : tv.state === 'connecting' || tv.state === 'open'
+        ? `Bridge reachable at ${tv.url} — waiting for the first candles`
+        : tv.state === 'idle'
+          ? 'Live feed is off — turn on TradingView in Settings to stream real quotes'
+          : `Bridge unreachable at ${tv.url || 'the configured URL'} — prices are simulated. Run npm run dev, or fix the backend URL in Settings.`;
 
   const results = useMemo(() => {
     const q = query.trim().toUpperCase();
@@ -86,7 +89,9 @@ export default function TopBar({ pairs, selected, eyebrow = 'FxOrbit Terminal', 
         <div className="session-chip">
           <Globe size={13} />
           <span>
-            {openSessions.length > 0 ? (
+            {closed.closed ? (
+              <>Market closed · <b>reopens {reopenLabel(closed.reopensAt)}</b></>
+            ) : openSessions.length > 0 ? (
               <><b>{openSessions.join(' · ')}</b> session{openSessions.length > 1 ? 's' : ''} live</>
             ) : (
               'Markets transitioning'
@@ -99,9 +104,9 @@ export default function TopBar({ pairs, selected, eyebrow = 'FxOrbit Terminal', 
           <span className="s">UTC Time</span>
         </div>
 
-        <div className={`live-badge${live ? '' : ' sim'}`} title={feedHint}>
-          <span className="live-dot" />
-          {live ? 'LIVE' : 'SIM'}
+        <div className={`live-badge${closed.closed ? ' closed' : live ? '' : ' sim'}`} title={feedHint}>
+          {closed.closed ? <Moon size={12} /> : <span className="live-dot" />}
+          {closed.closed ? 'CLOSED' : live ? 'LIVE' : 'SIM'}
         </div>
 
         {selected && (

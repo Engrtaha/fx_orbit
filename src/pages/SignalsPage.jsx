@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useState } from 'react';
 import {
-  Zap, ChevronDown, ArrowDownRight, ArrowUpRight, Loader2, Minus, Radio, History,
+  Zap, ChevronDown, ArrowDownRight, ArrowUpRight, Loader2, Minus, Radio, History, Moon,
 } from 'lucide-react';
-import { engine, fmt, TIMEFRAMES } from '../data/marketEngine';
+import { engine, fmt, marketClosed, reopenLabel, TIMEFRAMES } from '../data/marketEngine';
 import { loadSettings } from '../data/settings';
 import {
   generateAiSignal, saveSignal, activeSignals, recentOutcomes, subscribeSignals, signalProgress,
@@ -11,6 +11,13 @@ import {
 const ago = (ts) => {
   const m = Math.max(1, Math.round((Date.now() - ts) / 60000));
   return m < 60 ? `${m}m ago` : `${Math.round(m / 60)}h ago`;
+};
+
+const untilLabel = (d) => {
+  const mins = Math.max(0, Math.round((d - Date.now()) / 60000));
+  const days = Math.floor(mins / 1440);
+  const hours = Math.round((mins % 1440) / 60);
+  return days ? `in ${days}d ${hours}h` : `in ${hours}h`;
 };
 
 export default function SignalsPage() {
@@ -31,6 +38,9 @@ export default function SignalsPage() {
 
   const liveSigs = activeSignals();
   const outcomes = recentOutcomes(6);
+  // The engine ticks every second, so this re-evaluates across the close/open
+  // boundary without any extra timer.
+  const closed = marketClosed();
 
   const strategyName = settings.activeStrategy || 'AI Best';
   const subtitleStrategy = mode === 'my' ? strategyName : 'AI Best Strategy';
@@ -57,7 +67,7 @@ export default function SignalsPage() {
   };
 
   const generate = async () => {
-    if (!state || busy) return;
+    if (!state || busy || closed.closed) return;
     setBusy(true);
     try {
       const rules = strategyRules();
@@ -106,16 +116,34 @@ export default function SignalsPage() {
           <button className={`mode-btn${mode === 'ai' ? ' on' : ''}`} onClick={() => setMode('ai')}>AI Best Strategy</button>
         </div>
 
-        <button className="sig-generate" onClick={generate} disabled={busy}>
-          {busy ? <Loader2 size={16} className="spin" /> : <Zap size={16} />}
-          {busy ? 'Analyzing market…' : `Generate Signal for ${pair}`}
+        {closed.closed && (
+          <div className="sig-closed">
+            <Moon size={17} />
+            <div>
+              <b>Market is closed</b>
+              <span>
+                FX and indices are shut for the weekend, so no signal is generated.
+                The tape reopens {reopenLabel(closed.reopensAt)} ({untilLabel(closed.reopensAt)}).
+              </span>
+            </div>
+          </div>
+        )}
+
+        <button className={`sig-generate${closed.closed && !busy ? ' closed' : ''}`} onClick={generate} disabled={busy || closed.closed}>
+          {busy ? <Loader2 size={16} className="spin" /> : closed.closed ? <Moon size={16} /> : <Zap size={16} />}
+          {busy ? 'Analyzing market…' : closed.closed ? 'Market closed — signals resume when it reopens' : `Generate Signal for ${pair}`}
         </button>
       </section>
 
       <section className="panel sig-active rise" style={{ animationDelay: '80ms' }}>
         <div className="panel-head">
           <span className="panel-title"><Radio size={14} /> Active signals</span>
-          <span className="panel-sub">{liveSigs.length} live · held to TP/SL, then regenerated</span>
+          <span className="panel-sub">
+            {liveSigs.length} live ·{' '}
+            {closed.closed
+              ? 'frozen while the market is closed — nothing is scored or regenerated until it reopens'
+              : 'held to TP/SL, then regenerated'}
+          </span>
         </div>
         {liveSigs.length === 0 && (
           <p className="sig-note">
@@ -178,7 +206,7 @@ export default function SignalsPage() {
         )}
       </section>
 
-      {result && (
+      {result && !closed.closed && (
         <section className="panel open-trade rise" style={{ animationDelay: '140ms' }}>
           <div className="panel-head">
             <span className="panel-title">Open Trade — {result.symbol}</span>

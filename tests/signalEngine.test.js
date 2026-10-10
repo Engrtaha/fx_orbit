@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { seedStorage } from './setup.js';
 
 // Seed before importing: the engine constructor and loadSettings read localStorage.
@@ -94,6 +94,14 @@ describe('normalizeSignal', () => {
 });
 
 describe('active signal lifecycle', () => {
+  // The monitor does nothing while the tape is shut, so pin the clock to an
+  // open window (Monday 16:00 UTC). Only Date is faked — timers stay real.
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-10-12T16:00:00Z'));
+  });
+  afterEach(() => vi.useRealTimers());
+
   it('stores tradable signals, one per symbol, and skips WAIT', () => {
     expect(mod.saveSignal({ side: 'WAIT', sl: null, tp: null, symbol: 'US100' }, 'ai')).toBeNull();
 
@@ -150,6 +158,18 @@ describe('active signal lifecycle', () => {
     expect(hit).toBeDefined();
     expect(hit.pips).toBe(-40);
     expect(mod.activeSignalFor('EUR/USD')).not.toBeNull();
+  });
+
+  it('holds signals untouched while the market is closed', async () => {
+    vi.setSystemTime(new Date('2026-10-10T16:00:00Z')); // Saturday afternoon
+    const st = engine.getState('US100');
+    const plan = mod.saveSignal(sigResult('US100', 'LONG', st.mid, 50, 80), 'ai');
+    st.mid = plan.tp + 10 * st.pip; // would have scored a TP hit on a live tape
+
+    await mod.tickSignals();
+
+    expect(mod.activeSignalFor('US100').id).toBe(plan.id);
+    expect(mod.recentOutcomes(10).find((o) => o.symbol === 'US100')).toBeUndefined();
   });
 
   it('reports live pips and the entry-to-target fraction', () => {

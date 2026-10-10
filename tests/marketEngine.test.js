@@ -1,8 +1,8 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { seedStorage } from './setup.js';
 
 seedStorage({ pairs: ['US100', 'XAU/USD'], defaultPair: 'XAU/USD' });
-const { engine, volatilityPips } = await import('../src/data/marketEngine.js');
+const { engine, marketClosed, volatilityPips } = await import('../src/data/marketEngine.js');
 const { UNIVERSE } = await import('../src/data/settings.js');
 
 engine.start();
@@ -130,5 +130,41 @@ describe('PostgreSQL hydration', () => {
     expect(fresh.id).toBe('T-122');
     engine.closeTrade(fresh, engine.getState('XAU/USD').mid, 'cleanup');
     expect(engine.loadTrades([])).toBe(0); // nothing to restore leaves the book alone
+  });
+});
+
+describe('weekend market hours', () => {
+  const at = (iso) => marketClosed(new Date(iso));
+
+  it('stays open through the week and until New York shuts on Friday', () => {
+    expect(at('2026-10-09T13:00:00Z').closed).toBe(false); // Fri afternoon
+    expect(at('2026-10-09T21:59:59Z').closed).toBe(false); // one second before the close
+  });
+
+  it('closes Friday 22:00 UTC and holds through Saturday', () => {
+    const fri = at('2026-10-09T22:00:00Z');
+    expect(fri.closed).toBe(true);
+    expect(fri.reopensAt.toISOString()).toBe('2026-10-11T22:00:00.000Z');
+    const sat = at('2026-10-10T16:00:00Z');
+    expect(sat.closed).toBe(true);
+    expect(sat.reopensAt.toISOString()).toBe('2026-10-11T22:00:00.000Z');
+  });
+
+  it('reopens Sunday 22:00 UTC for the Sydney session', () => {
+    expect(at('2026-10-11T21:59:00Z').closed).toBe(true);
+    expect(at('2026-10-11T22:00:00Z').closed).toBe(false);
+    expect(at('2026-10-12T02:00:00Z').closed).toBe(false); // Mon 02:00
+  });
+
+  it('refuses to manage the trade book while the tape is shut', () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date('2026-10-10T16:00:00Z'));
+      expect(engine.bookOpen()).toBe(false);
+      vi.setSystemTime(new Date('2026-10-12T16:00:00Z'));
+      expect(engine.bookOpen()).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

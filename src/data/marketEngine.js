@@ -29,6 +29,25 @@ export const sessionOpen = (s, hourUtc) => {
   return a < b ? hourUtc >= a && hourUtc < b : hourUtc >= a || hourUtc < b;
 };
 
+// FX and the index CFDs trade 24/5: the tape stops when New York closes on
+// Friday (22:00 UTC) and prints again when Sydney opens on Sunday. Whatever the
+// feed shows in between is Friday's last print, not a live price.
+const WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+
+export const reopenLabel = (d) => (d
+  ? `${WEEKDAYS[d.getUTCDay()]} ${String(d.getUTCHours()).padStart(2, '0')}:00 UTC`
+  : '');
+
+export function marketClosed(now = new Date()) {
+  const day = now.getUTCDay();
+  const hour = now.getUTCHours();
+  const closed = (day === 5 && hour >= 22) || day === 6 || (day === 0 && hour < 22);
+  if (!closed) return { closed: false, reopensAt: null };
+  const reopensAt = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 22));
+  reopensAt.setUTCDate(reopensAt.getUTCDate() + (day === 5 ? 2 : day === 6 ? 1 : 0));
+  return { closed: true, reopensAt };
+}
+
 export const fmt = (v, d) =>
   v.toLocaleString('en-US', { minimumFractionDigits: d, maximumFractionDigits: d });
 
@@ -191,14 +210,17 @@ class MarketEngine {
   tick() {
     this.tickCount += 1;
     const roll = this.tickCount % 8 === 0;
+    const open = this.bookOpen();
     for (const s of this.states.values()) {
       if (s.tv) {
         // Price is driven by the TradingView feed; tick() only runs the
         // trade/strategy bookkeeping on top of the realtime candles.
         this.refreshIndicators(s);
-        this.checkTradeExits(s);
-        this.maybeAutoTrade(s);
-        if (roll) this.checkStrategies(s);
+        if (open) {
+          this.checkTradeExits(s);
+          this.maybeAutoTrade(s);
+          if (roll) this.checkStrategies(s);
+        }
         continue;
       }
       const stepVol = s.vol * 0.12;
@@ -232,11 +254,19 @@ class MarketEngine {
       this.refreshIndicators(s);
       this.derive(s);
 
-      this.checkTradeExits(s);
-      this.maybeAutoTrade(s);
-      if (roll) this.checkStrategies(s);
+      if (open) {
+        this.checkTradeExits(s);
+        this.maybeAutoTrade(s);
+        if (roll) this.checkStrategies(s);
+      }
     }
     this.emit();
+  }
+
+  // While the tape is shut no position may be opened, closed or time-stopped:
+  // the last print is stale, so acting on it books phantom P&L into history.
+  bookOpen() {
+    return !marketClosed().closed;
   }
 
   // ── TradingView realtime ingest ─────────────────────────────────────────────
@@ -355,8 +385,10 @@ class MarketEngine {
     if (s.spark.length > 90) s.spark.shift();
     this.refreshIndicators(s);
     this.derive(s);
-    this.checkTradeExits(s);
-    this.maybeAutoTrade(s);
+    if (this.bookOpen()) {
+      this.checkTradeExits(s);
+      this.maybeAutoTrade(s);
+    }
     this.scheduleEmit();
   }
 
@@ -385,7 +417,7 @@ class MarketEngine {
     if (tick.change != null) s.change = tick.change;
     if (tick.changePct != null) s.changePct = tick.changePct;
     s.tv = true;
-    this.checkTradeExits(s);
+    if (this.bookOpen()) this.checkTradeExits(s);
     this.scheduleEmit();
   }
 
