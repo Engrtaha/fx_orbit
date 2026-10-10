@@ -27,6 +27,7 @@ Run one dev stack at a time — both ports are fixed:
 - The browser talks to the bridge on `:5178` (Settings → TradingView backend URL must match). If a second `npm run dev` starts while that port is taken, the bridge now says so, stays idle and retries every 5s instead of crashing: under `concurrently -k` a dead bridge also kills Vite, which leaves the page half-rendered.
 - `TV_PORT=5179 npm run dev` moves the bridge, but the app keeps looking at `:5178` until you change the backend URL in Settings.
 - The badge at the top right reports where the prices actually come from: `LIVE` = the bridge is streaming, `SIM` = simulated prices (hover it for the reason).
+- Vite binds `127.0.0.1:5173` with `strictPort`, so `http://localhost:5173` and `http://127.0.0.1:5173` both work and a second `npm run dev` fails loudly instead of quietly hopping to 5174 and shadowing the first.
 - Postgres on `:5432` (db `fxorbit`) is optional; the bridge keeps serving without it and just skips persistence.
 
 To see what holds a port: `lsof -nP -iTCP:5178 -sTCP:LISTEN`.
