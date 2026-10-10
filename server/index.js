@@ -648,6 +648,11 @@ const server = createServer(async (req, res) => {
 
 const wss = new WebSocketServer({ server, path: '/ws' });
 
+// ws re-emits the HTTP server's errors on the WebSocketServer, and an 'error'
+// event with no listener kills the process — which under `concurrently -k` also
+// takes the Vite dev server down with it.
+wss.on('error', (err) => console.error('[tv-bridge] websocket:', err?.message ?? err));
+
 wss.on('connection', (socket) => {
   const session = { candleWatchers: new Map(), quoteWatcher: null, subsKey: '' };
 
@@ -727,10 +732,37 @@ wss.on('connection', (socket) => {
   socket.on('close', () => { void stopAll(); });
 });
 
-server.listen(PORT, HOST, () => {
-  console.log(`[tv-bridge] FxOrbit TradingView bridge listening on http://${HOST}:${PORT}`);
+// A second `npm run dev` — or a stale terminal still holding the port — must not
+// kill this process: `concurrently -k` would then take Vite down too and the app
+// would die mid-render. Retry the bind instead until the port comes free.
+let bound = false;
+let waitingForPort = false;
+
+server.on('error', (err) => {
+  if (err?.code !== 'EADDRINUSE') {
+    console.error('[tv-bridge]', err?.message ?? err);
+    if (!waitingForPort) process.exit(1);
+    return;
+  }
+  if (!waitingForPort) {
+    waitingForPort = true;
+    console.log(`[tv-bridge] :${PORT} is already served by another bridge — staying idle, retrying every 5s.`);
+    console.log('[tv-bridge] The app keeps working against the bridge that owns the port.');
+    console.log(`[tv-bridge] To run this one instead: close the other dev stack, or start with TV_PORT=5179 npm run dev`);
+    console.log('[tv-bridge] If you do switch ports, point Settings → TradingView backend URL at it.');
+  }
+  setTimeout(() => { if (!bound) server.listen(PORT, HOST); }, 5000);
+});
+
+server.on('listening', () => {
+  if (bound) return;
+  bound = true;
+  waitingForPort = false;
+  console.log(`[tv-bridge] FxOrbit TradingView bridge listening on http://localhost:${PORT}`);
   console.log('[tv-bridge] REST: /api/status /api/quote /api/candles /api/news?token=…');
   console.log('[tv-bridge] DB:   /api/trades (GET/POST) /api/news/archive /api/db/stats');
   console.log('[tv-bridge] WS: /ws  { type: "subscribe", symbols, tfs }');
   void initDb();
 });
+
+server.listen(PORT, HOST);

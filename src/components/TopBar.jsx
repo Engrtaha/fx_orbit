@@ -2,18 +2,33 @@ import { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Search, Globe } from 'lucide-react';
 import { SESSIONS, fmt, sessionOpen } from '../data/marketEngine';
+import { getTvStatus, subscribeTvStatus } from '../data/tvClient';
 import { Badges, Delta } from './shared';
 
 export default function TopBar({ pairs, selected, eyebrow = 'FxOrbit Terminal', title = 'Market Analysis' }) {
   const [query, setQuery] = useState('');
   const [focused, setFocused] = useState(false);
   const [now, setNow] = useState(() => new Date());
+  const [tv, setTv] = useState(() => getTvStatus());
   const navigate = useNavigate();
 
   useEffect(() => {
     const t = setInterval(() => setNow(new Date()), 1000);
     return () => clearInterval(t);
   }, []);
+
+  useEffect(() => subscribeTvStatus(setTv), []);
+
+  // The badge used to be decoration; it has to report the feed the prices
+  // actually came from, otherwise a dead bridge looks like a live terminal.
+  const live = pairs.some((p) => p.tv);
+  const feedHint = live
+    ? `TradingView bridge is streaming quotes on ${tv.url}`
+    : tv.state === 'connecting' || tv.state === 'open'
+      ? `Bridge reachable at ${tv.url} — waiting for the first candles`
+      : tv.state === 'idle'
+        ? 'Live feed is off — turn on TradingView in Settings to stream real quotes'
+        : `Bridge unreachable at ${tv.url || 'the configured URL'} — prices are simulated. Run npm run dev, or fix the backend URL in Settings.`;
 
   const results = useMemo(() => {
     const q = query.trim().toUpperCase();
@@ -84,9 +99,9 @@ export default function TopBar({ pairs, selected, eyebrow = 'FxOrbit Terminal', 
           <span className="s">UTC Time</span>
         </div>
 
-        <div className="live-badge">
+        <div className={`live-badge${live ? '' : ' sim'}`} title={feedHint}>
           <span className="live-dot" />
-          LIVE
+          {live ? 'LIVE' : 'SIM'}
         </div>
 
         {selected && (

@@ -12,15 +12,17 @@ const MAX_ROWS = 500;
 
 const bridgeUrl = () => (loadSettings().tvBackendUrl || 'http://localhost:5178').replace(/\/+$/, '');
 
-// Restore the archived book; returns how many trades were loaded.
+// Restore the archived book. Returns the row count, or null when the archive
+// could not be read — a bridge that is merely down must never be told the
+// browser's (possibly simulated) book is the truth.
 export async function hydrateTrades() {
   try {
     const res = await fetch(`${bridgeUrl()}/api/trades?limit=${MAX_ROWS}`);
     const body = await res.json().catch(() => null);
-    if (!body?.ok || !Array.isArray(body.trades)) return 0;
+    if (!body?.ok || !Array.isArray(body.trades)) return null;
     return engine.loadTrades(body.trades);
   } catch {
-    return 0;
+    return null;
   }
 }
 
@@ -44,17 +46,22 @@ export async function syncTrades() {
   }
 }
 
-// Hydrate once, then keep the archive in step. Returns a stop function.
+// Read the archive back first, then keep it in step. Returns a stop function.
 export function startTradeSync() {
   let timer = null;
-  let stopped = false;
-  void hydrateTrades().finally(() => {
-    if (stopped) return;
-    void syncTrades();
-    timer = setInterval(() => { void syncTrades(); }, SYNC_MS);
-  });
+  let hydrated = false;
+
+  const tick = async () => {
+    if (!hydrated) {
+      if ((await hydrateTrades()) === null) return;
+      hydrated = true;
+    }
+    await syncTrades();
+  };
+
+  void tick();
+  timer = setInterval(() => { void tick(); }, SYNC_MS);
   return () => {
-    stopped = true;
     if (timer) clearInterval(timer);
   };
 }
