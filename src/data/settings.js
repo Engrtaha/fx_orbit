@@ -76,6 +76,7 @@ const defaults = {
   initialBalance: 100,
   activeStrategy: '',
   activeStrategyData: null,
+  activeStrategyId: '',
   tvEnabled: false,
   tvBackendUrl: 'http://localhost:5178',
   newsApiKey: '',

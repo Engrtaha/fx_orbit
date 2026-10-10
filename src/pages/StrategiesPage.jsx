@@ -1,14 +1,18 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Brain, RefreshCw, ShieldCheck, FileText, Upload, Sparkles, X, AlertTriangle,
-  Image as ImageIcon, Video, File as FileIcon, Trash2,
+  Image as ImageIcon, Video, File as FileIcon, Trash2, Pencil, GitMerge, Star, Check, Layers,
 } from 'lucide-react';
 import { engine, fmt } from '../data/marketEngine';
-import { UNIVERSE, loadSettings, saveSettings } from '../data/settings';
+import { UNIVERSE, loadSettings } from '../data/settings';
+import {
+  ORIGINS, addStrategy, applyActive, armStrategy, findStrategy, loadLibrary, mergeStrategies,
+  normalizeStrategy, removeStrategy, saveLibrary, updateStrategy,
+} from '../data/strategyBook';
 import PriceChart from '../components/PriceChart';
 import {
-  downscale, parseJsonLoose, aiReady, aiAuthHeaders, aiSupportsVision,
-  fileKind, readFile, clipText, videoFrames, attachmentContent,
+  downscale, parseJsonLoose, aiReady, aiChat, aiSupportsVision, attachmentContent,
+  fileKind, readFile, clipText, videoFrames,
 } from '../utils/ai';
 
 const MAX_FILES = 8;
@@ -53,6 +57,14 @@ const SYSTEM_PROMPT = [
   'Mirror the direction the user describes exactly: a strategy that buys dips is a LONG strategy — never describe it as short.',
 ].join(' ');
 
+const MERGE_PROMPT = [
+  'You are FxOrbit, a senior quantitative strategy analyst inside a trading terminal.',
+  'Merge the two strategies below into ONE coherent strategy and respond with ONLY a JSON object (no markdown) shaped:',
+  '{"title":"short name for the merged book","pair":"single instrument symbol",',
+  '"analysis":["paragraph 1","paragraph 2"],"entryRules":["rule"],"riskRules":["rule"]}',
+  'Keep every rule that does not conflict. When two rules conflict, keep the stricter one and say why in the analysis.',
+].join(' ');
+
 // A symbol the user explicitly named outranks whatever pair the model picks.
 function mentionedPair(text, snapshot) {
   const t = String(text).toLowerCase();
@@ -60,6 +72,15 @@ function mentionedPair(text, snapshot) {
   const mentioned = UNIVERSE.find((u) => t.includes(u.symbol.toLowerCase()))
     ?? (t.includes('gold') ? UNIVERSE.find((u) => u.symbol === 'XAU/USD') : null);
   return mentioned && symbols.has(mentioned.symbol) ? mentioned.symbol : null;
+}
+
+// A book may only trade an instrument the user has enabled in their universe.
+function resolvePair(candidate, text, enabled, settings) {
+  return mentionedPair(text, enabled)
+    ?? (enabled.some((p) => p.symbol === candidate) ? candidate : null)
+    ?? (enabled.some((p) => p.symbol === settings.defaultPair) ? settings.defaultPair : null)
+    ?? enabled[0]?.symbol
+    ?? 'EUR/USD';
 }
 
 function hashStr(str) {
@@ -174,14 +195,39 @@ function simulatedStrategy(text, snapshot) {
   };
 }
 
+const lines = (text) => String(text ?? '').split('\n').map((l) => l.trim()).filter(Boolean);
+
+const relTime = (ts) => {
+  const mins = Math.max(0, Math.round((Date.now() - ts) / 60000));
+  if (mins < 1) return 'just now';
+  if (mins < 60) return `${mins}m ago`;
+  if (mins < 1440) return `${Math.round(mins / 60)}h ago`;
+  return new Date(ts).toISOString().slice(0, 10);
+};
+
 export default function StrategiesPage() {
+  // Read once: the library may import a strategy saved before it existed, and
+  // the active pointer is matched by id first, by title second.
+  const [boot] = useState(() => {
+    const list = loadLibrary();
+    const s = loadSettings();
+    const found = list.find((x) => x.id === s.activeStrategyId)
+      ?? (s.activeStrategy ? list.find((x) => x.title === s.activeStrategy) : null);
+    return { list, activeId: found?.id ?? '' };
+  });
   const [tab, setTab] = useState('own');
   const [desc, setDesc] = useState('');
   const [files, setFiles] = useState([]); // {id, name, kind, size, dataUrl?|frames?|text?|unsupported}
   const [busy, setBusy] = useState(false);
+  const [merging, setMerging] = useState(false);
   const [error, setError] = useState(null);
   const [drag, setDrag] = useState(false);
-  const [active, setActive] = useState(() => loadSettings().activeStrategyData ?? null);
+  const [library, setLibrary] = useState(boot.list);
+  const [activeId, setActiveId] = useState(boot.activeId);
+  const [draft, setDraft] = useState(null); // analysed on request, not saved until asked
+  const [mergeSel, setMergeSel] = useState([]);
+  const [edit, setEdit] = useState(null); // {id,title,pair,analysis,entryRules,riskRules} as text
+  const [toast, setToast] = useState(null);
   const [pairs, setPairs] = useState(() => engine.getSnapshot());
   const [tf, setTf] = useState('15m');
   const [aiSymbol, setAiSymbol] = useState(() => engine.getSnapshot()[0]?.symbol ?? 'EUR/USD');
@@ -193,11 +239,142 @@ export default function StrategiesPage() {
 
   useEffect(() => engine.subscribe((list) => setPairs(list)), []);
 
-  const plan = useMemo(() => genAiPlan(aiSymbol, salt), [aiSymbol, salt]);
+  // The engine loads the universe after mount, so the raw selection can name a
+  // pair the user has disabled — resolve it against the live snapshot instead.
+  const genSymbol = pairs.some((p) => p.symbol === aiSymbol)
+    ? aiSymbol
+    : (pairs.some((p) => p.symbol === loadSettings().defaultPair)
+      ? loadSettings().defaultPair
+      : pairs[0]?.symbol ?? aiSymbol);
+
+  const plan = useMemo(() => genAiPlan(genSymbol, salt), [genSymbol, salt]);
+  const active = findStrategy(library, activeId);
+  const chartPair = pairs.find((p) => p.symbol === (edit?.pair ?? active?.pair)) ?? pairs[0];
+
+  const flash = (msg) => {
+    setToast(msg);
+    setTimeout(() => setToast(null), 2600);
+  };
+
+  // Every library mutation goes through here so localStorage and the engine's
+  // execution list can never drift apart.
+  const write = (next) => {
+    setLibrary(saveLibrary(next));
+    engine.syncStrategies(next);
+    return next;
+  };
 
   const toggleAuto = (sym) => {
     engine.setAutoTrade(sym, !autoSet.has(sym));
     setAutoSet(new Set(loadSettings().autoTrade));
+  };
+
+  const activate = (id) => {
+    setActiveId(id);
+    applyActive(library, id);
+    const s = findStrategy(library, id);
+    flash(s ? `“${s.title}” is now the active strategy` : 'Active strategy cleared');
+  };
+
+  const saveDraft = (andActivate) => {
+    const saved = normalizeStrategy(draft);
+    const next = write(addStrategy(library, saved));
+    if (andActivate) {
+      setActiveId(saved.id);
+      applyActive(next, saved.id);
+    }
+    setDraft(null);
+    setFiles([]);
+    setDesc('');
+    flash(andActivate
+      ? `“${saved.title}” saved and set active`
+      : `“${saved.title}” saved — your active strategy is unchanged`);
+  };
+
+  const startEdit = (s) => setEdit({
+    id: s.id,
+    title: s.title,
+    pair: s.pair,
+    analysis: s.analysis.join('\n'),
+    entryRules: s.entryRules.join('\n'),
+    riskRules: s.riskRules.join('\n'),
+  });
+
+  const saveEdit = () => {
+    const next = write(updateStrategy(library, edit.id, {
+      title: edit.title,
+      pair: edit.pair,
+      analysis: lines(edit.analysis),
+      entryRules: lines(edit.entryRules),
+      riskRules: lines(edit.riskRules),
+    }));
+    if (edit.id === activeId) applyActive(next, activeId); // keep the mirror other pages read in step
+    setEdit(null);
+    flash('Strategy updated');
+  };
+
+  const toggleArm = (s) => {
+    write(armStrategy(library, s.id, !s.armed));
+    flash(s.armed ? `“${s.title}” disarmed` : `“${s.title}” armed — it trades ${s.pair} off the EMA cross`);
+  };
+
+  const removeOne = (s) => {
+    const next = write(removeStrategy(library, s.id));
+    if (s.id === activeId) {
+      setActiveId('');
+      applyActive(next, '');
+    }
+    setMergeSel((sel) => sel.filter((id) => id !== s.id));
+    flash(`“${s.title}” deleted`);
+  };
+
+  const toggleMerge = (id) => setMergeSel((sel) => (
+    sel.includes(id) ? sel.filter((x) => x !== id) : [...sel.slice(-1), id]
+  ));
+
+  const runMerge = async () => {
+    const picked = mergeSel.map((id) => findStrategy(library, id)).filter(Boolean);
+    if (picked.length !== 2) return;
+    const [a, b] = picked;
+    setMerging(true);
+    setError(null);
+    try {
+      const settings = loadSettings();
+      let merged = mergeStrategies(a, b);
+      let note = '';
+      if (aiReady(settings)) {
+        // The model writes the merged book; the deterministic union is the floor
+        // under it, so a dead or unparsable reply still merges the two.
+        try {
+          const text = await aiChat(settings, [
+            { role: 'system', content: MERGE_PROMPT },
+            { role: 'user', content: `Strategy A:\n${JSON.stringify(a, null, 1)}\n\nStrategy B:\n${JSON.stringify(b, null, 1)}` },
+          ], { temperature: 0.1 });
+          const parsed = parseJsonLoose(text);
+          if (parsed) {
+            merged = normalizeStrategy({
+              ...merged,
+              ...parsed,
+              id: merged.id,
+              parents: [a.id, b.id],
+              origin: 'merged',
+              pair: resolvePair(parsed.pair, '', pairs.length ? pairs : engine.getSnapshot(), settings),
+            });
+          } else {
+            note = ' — the model reply was unreadable, so the rules were unioned instead';
+          }
+        } catch {
+          note = ' — model unreachable, so the rules were unioned instead';
+        }
+      }
+      write(addStrategy(library, merged));
+      setMergeSel([]);
+      flash(`“${merged.title}” saved${note} — set it active when you are ready`);
+    } catch (err) {
+      setError(err.message || 'Merge failed. Check your AI model settings.');
+    } finally {
+      setMerging(false);
+    }
   };
 
   const pickFiles = async (list) => {
@@ -236,46 +413,21 @@ export default function StrategiesPage() {
           files,
           { vision: aiSupportsVision(settings) },
         );
-        const res = await fetch(`${settings.aiBaseUrl || 'https://api.openai.com/v1'}/chat/completions`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            ...aiAuthHeaders(settings),
-          },
-          body: JSON.stringify({
-            model: settings.aiModel || 'gpt-4o-mini',
-            temperature: 0.2,
-            messages: [
-              { role: 'system', content: SYSTEM_PROMPT },
-              { role: 'user', content },
-            ],
-          }),
-        });
-        if (!res.ok) throw new Error(`AI API responded ${res.status}`);
-        const data = await res.json();
-        const text = data.choices?.[0]?.message?.content ?? '';
+        const text = await aiChat(settings, [
+          { role: 'system', content: SYSTEM_PROMPT },
+          { role: 'user', content },
+        ]);
         const parsed = parseJsonLoose(text);
         if (!parsed) throw new Error('Could not parse the model response.');
-        // Signals may only target instruments the user enabled in their universe,
-        // and a symbol they named in the description outranks the model's pick.
-        const enabled = pairs.length ? pairs : engine.getSnapshot();
-        const explicit = mentionedPair(desc, enabled);
-        const pair = explicit
-          ?? (enabled.some((p) => p.symbol === parsed.pair) ? parsed.pair : null)
-          ?? (enabled.some((p) => p.symbol === settings.defaultPair) ? settings.defaultPair : null)
-          ?? enabled[0]?.symbol
-          ?? 'EUR/USD';
-        setActive({
-          title: parsed.title || 'Custom Strategy',
-          pair,
-          analysis: Array.isArray(parsed.analysis) ? parsed.analysis.map(String) : [String(parsed.analysis ?? '')].filter(Boolean),
-          entryRules: Array.isArray(parsed.entryRules) ? parsed.entryRules.map(String) : [],
-          riskRules: Array.isArray(parsed.riskRules) ? parsed.riskRules.map(String) : [],
+        setDraft(normalizeStrategy({
+          ...parsed,
+          pair: resolvePair(parsed.pair, desc, pairs.length ? pairs : engine.getSnapshot(), settings),
+          origin: 'ai',
           simulated: false,
-        });
+        }));
       } else {
         await new Promise((r) => setTimeout(r, 1400));
-        setActive(simulatedStrategy(desc, pairs));
+        setDraft(normalizeStrategy({ ...simulatedStrategy(desc, pairs), origin: 'ai', simulated: true }));
       }
     } catch (err) {
       setError(err.message || 'Analysis failed. Check your AI model settings.');
@@ -284,24 +436,14 @@ export default function StrategiesPage() {
     }
   };
 
-  const current = useMemo(() => (
-    tab === 'ai'
-      ? {
-        title: `${plan.style} — ${aiSymbol}`,
-        pair: aiSymbol,
-        analysis: [plan.thesis],
-        entryRules: plan.entryRules,
-        riskRules: plan.riskRules,
-        simulated: false,
-      }
-      : active
-  ), [tab, plan, aiSymbol, active]);
-
-  const chartPair = pairs.find((p) => p.symbol === current?.pair) ?? pairs[0];
-
-  useEffect(() => {
-    if (current) saveSettings({ activeStrategy: current.title, activeStrategyData: current });
-  }, [current]);
+  const savePlan = () => setDraft(normalizeStrategy({
+    title: `${plan.style} — ${genSymbol}`,
+    pair: genSymbol,
+    analysis: [plan.thesis],
+    entryRules: plan.entryRules,
+    riskRules: plan.riskRules,
+    origin: 'market',
+  }));
 
   return (
     <div className="page strat-page">
@@ -401,16 +543,19 @@ export default function StrategiesPage() {
           <div className="gen-bar">
             <div className="field">
               <label>Instrument</label>
-              <select className="inp" value={aiSymbol} onChange={(e) => { setAiSymbol(e.target.value); setSalt(1); }}>
+              <select className="inp" value={genSymbol} onChange={(e) => { setAiSymbol(e.target.value); setSalt(1); }}>
                 {pairs.map((p) => <option key={p.symbol} value={p.symbol}>{p.symbol} · {p.group}</option>)}
               </select>
             </div>
             <button className="btn ghost" onClick={() => setSalt((x) => x + 1)}>
               <RefreshCw size={14} /> Regenerate
             </button>
-            <button className={`btn ${autoSet.has(aiSymbol) ? 'warn' : 'primary'}`} onClick={() => toggleAuto(aiSymbol)}>
+            <button className="btn ghost" onClick={savePlan}>
+              <Layers size={14} /> Save this plan
+            </button>
+            <button className={`btn ${autoSet.has(genSymbol) ? 'warn' : 'primary'}`} onClick={() => toggleAuto(genSymbol)}>
               <ShieldCheck size={14} />
-              {autoSet.has(aiSymbol) ? 'Auto-trade ON — disarm' : 'Enable auto-trade'}
+              {autoSet.has(genSymbol) ? 'Auto-trade ON — disarm' : 'Enable auto-trade'}
             </button>
           </div>
           <div className="ai-plan-stats">
@@ -428,50 +573,186 @@ export default function StrategiesPage() {
               <div><span>Profit target</span><b className="up">{plan.levels.tp}</b></div>
             </div>
           )}
+          {error && <p className="ai-error"><AlertTriangle size={13} /> {error}</p>}
         </section>
       )}
 
-      <section className="active-strat rise" style={{ animationDelay: '120ms' }}>
-        <div className="panel active-analysis">
-          <div className="active-eyebrow">Active Strategy</div>
-          <h2 className="active-title">{current ? current.title : 'No active strategy yet'}</h2>
-          {current ? (
-            <>
-              <div className="ai-block">
-                <div className="k">AI Analysis</div>
-                {current.analysis.map((p, i) => <p key={i}>{p}</p>)}
-              </div>
-              <div className="strat-cols">
+      {draft && (
+        <section className="panel strat-draft rise">
+          <div className="draft-head">
+            <span className="draft-tag"><Sparkles size={12} /> New analysis</span>
+            <h3>{draft.title}</h3>
+            <span className="draft-pair">{draft.pair}</span>
+            {draft.simulated && <span className="draft-sim">simulated read</span>}
+          </div>
+          <p className="draft-sum">{draft.analysis[0]}</p>
+          <div className="strat-cols">
+            <div className="ai-block">
+              <div className="k">Entry rules</div>
+              <ul className="rule-list">{draft.entryRules.map((r) => <li key={r}>{r}</li>)}</ul>
+            </div>
+            <div className="ai-block">
+              <div className="k">Risk rules</div>
+              <ul className="rule-list">{draft.riskRules.map((r) => <li key={r}>{r}</li>)}</ul>
+            </div>
+          </div>
+          <div className="draft-actions">
+            <button className="btn primary sm" onClick={() => saveDraft(true)}><Star size={13} /> Use this one</button>
+            <button className="btn ghost sm" onClick={() => saveDraft(false)}>
+              <Check size={13} /> Save{active ? `, keep “${active.title}”` : ''}
+            </button>
+            <button className="btn ghost sm" onClick={() => setDraft(null)}><X size={13} /> Discard</button>
+          </div>
+          <p className="draft-note">Nothing is saved or switched until you choose — your current setup stays exactly as it is.</p>
+        </section>
+      )}
+
+      {library.length > 0 && (
+        <section className="panel strat-lib-panel rise" style={{ animationDelay: '90ms' }}>
+          <div className="panel-head">
+            <span className="panel-title"><Layers size={14} /> Strategy Library</span>
+            <span className="panel-sub">{library.length} saved · pick two to merge</span>
+            {mergeSel.length > 0 && (
+              <span className="merge-actions">
+                <button
+                  className={`btn sm ${mergeSel.length === 2 ? 'primary' : 'ghost'}`}
+                  disabled={mergeSel.length !== 2 || merging}
+                  onClick={runMerge}
+                >
+                  <GitMerge size={13} /> {merging ? 'Merging…' : `Merge ${mergeSel.length}/2`}
+                </button>
+                <button className="btn ghost sm" onClick={() => setMergeSel([])}><X size={12} /> Cancel</button>
+              </span>
+            )}
+          </div>
+          <div className="strat-lib">
+            {library.map((s) => (
+              <article
+                key={s.id}
+                className={`strat-card${s.id === activeId ? ' active' : ''}${mergeSel.includes(s.id) ? ' picking' : ''}`}
+              >
+                <div className="strat-card-top">
+                  <span className={`origin-chip ${s.origin}`}>{ORIGINS[s.origin]}</span>
+                  {s.id === activeId && <span className="active-chip"><Star size={9} /> Active</span>}
+                  {s.armed && <span className="armed-chip"><ShieldCheck size={9} /> Armed</span>}
+                </div>
+                <h3 className="strat-card-title">{s.title}</h3>
+                <div className="strat-card-meta">
+                  <b className="pair">{s.pair}</b>
+                  <span>{s.entryRules.length} entries</span>
+                  <span>{s.riskRules.length} risk</span>
+                  <span>{relTime(s.updatedAt)}</span>
+                </div>
+                <p className="strat-card-sum">{s.analysis[0]}</p>
+                <div className="strat-card-actions">
+                  {s.id === activeId
+                    ? <span className="in-use"><Check size={12} /> In use</span>
+                    : <button className="btn ghost xs" onClick={() => activate(s.id)}><Star size={12} /> Use</button>}
+                  <button className="btn ghost xs" onClick={() => startEdit(s)}><Pencil size={12} /> Edit</button>
+                  <button className={`btn xs ${s.armed ? 'warn' : 'ghost'}`} onClick={() => toggleArm(s)}>
+                    <ShieldCheck size={12} /> {s.armed ? 'Disarm' : 'Auto-trade'}
+                  </button>
+                  <button
+                    className={`btn xs ${mergeSel.includes(s.id) ? 'primary' : 'ghost'}`}
+                    onClick={() => toggleMerge(s.id)}
+                    title="Select two strategies to merge"
+                  >
+                    <GitMerge size={12} /> Merge
+                  </button>
+                  <button className="btn xs danger" onClick={() => removeOne(s)} title="Delete strategy"><Trash2 size={12} /></button>
+                </div>
+              </article>
+            ))}
+          </div>
+        </section>
+      )}
+
+      {edit ? (
+        <section className="panel settings-section strat-edit rise">
+          <div className="panel-head">
+            <span className="panel-title"><Pencil size={14} /> Edit Strategy</span>
+            <button className="btn ghost sm" onClick={() => setEdit(null)}><X size={12} /> Cancel</button>
+          </div>
+          <div className="field-row">
+            <div className="field grow">
+              <label>Title</label>
+              <input className="inp" value={edit.title} onChange={(e) => setEdit({ ...edit, title: e.target.value })} />
+            </div>
+            <div className="field">
+              <label>Pair</label>
+              <select className="inp" value={edit.pair} onChange={(e) => setEdit({ ...edit, pair: e.target.value })}>
+                {(pairs.length ? pairs : engine.getSnapshot()).map((p) => <option key={p.symbol} value={p.symbol}>{p.symbol}</option>)}
+              </select>
+            </div>
+          </div>
+          <div className="field">
+            <label>Analysis — one paragraph per line</label>
+            <textarea className="inp strat-desc" value={edit.analysis} onChange={(e) => setEdit({ ...edit, analysis: e.target.value })} />
+          </div>
+          <div className="strat-cols">
+            <div className="field">
+              <label>Entry rules — one per line</label>
+              <textarea className="inp strat-desc" value={edit.entryRules} onChange={(e) => setEdit({ ...edit, entryRules: e.target.value })} />
+            </div>
+            <div className="field">
+              <label>Risk rules — one per line</label>
+              <textarea className="inp strat-desc" value={edit.riskRules} onChange={(e) => setEdit({ ...edit, riskRules: e.target.value })} />
+            </div>
+          </div>
+          <div className="btn-row">
+            <button className="btn primary sm" disabled={!edit.title.trim()} onClick={saveEdit}><Check size={13} /> Save changes</button>
+          </div>
+        </section>
+      ) : (
+        <section className="active-strat rise" style={{ animationDelay: '120ms' }}>
+          <div className="panel active-analysis">
+            <div className="active-eyebrow">
+              Active Strategy
+              {active && <button className="btn ghost xs" onClick={() => activate('')}><X size={11} /> Unset</button>}
+            </div>
+            <h2 className="active-title">{active ? active.title : 'No active strategy yet'}</h2>
+            {active ? (
+              <>
                 <div className="ai-block">
-                  <div className="k">Entry rules</div>
-                  <ul className="rule-list">
-                    {current.entryRules.map((r) => <li key={r}>{r}</li>)}
-                  </ul>
+                  <div className="k">AI Analysis</div>
+                  {active.analysis.map((p, i) => <p key={i}>{p}</p>)}
                 </div>
-                <div className="ai-block">
-                  <div className="k">Risk rules</div>
-                  <ul className="rule-list">
-                    {current.riskRules.map((r) => <li key={r}>{r}</li>)}
-                  </ul>
+                <div className="strat-cols">
+                  <div className="ai-block">
+                    <div className="k">Entry rules</div>
+                    <ul className="rule-list">{active.entryRules.map((r) => <li key={r}>{r}</li>)}</ul>
+                  </div>
+                  <div className="ai-block">
+                    <div className="k">Risk rules</div>
+                    <ul className="rule-list">{active.riskRules.map((r) => <li key={r}>{r}</li>)}</ul>
+                  </div>
                 </div>
-              </div>
-              {current.simulated && (
-                <div className="ai-risk">
-                  <AlertTriangle size={12} /> Simulated read — add an AI model API key in Settings for true strategy analysis.
-                </div>
-              )}
-            </>
-          ) : (
-            <p className="dim empty-strat">
-              Describe your strategy above and hit Analyze, or open the AI Market Strategy tab to generate one from live market analysis.
-            </p>
-          )}
-        </div>
-        {chartPair && <PriceChart pair={chartPair} symbol={chartPair.symbol} tf={tf} onTfChange={setTf} />}
-      </section>
+                {active.parents.length > 0 && (
+                  <div className="merged-from">
+                    <GitMerge size={12} /> Merged from{' '}
+                    {active.parents.map((id) => findStrategy(library, id)?.title).filter(Boolean).join(' + ') || 'deleted strategies'}
+                  </div>
+                )}
+                {active.simulated && (
+                  <div className="ai-risk">
+                    <AlertTriangle size={12} /> Simulated read — add an AI model API key in Settings for true strategy analysis.
+                  </div>
+                )}
+              </>
+            ) : (
+              <p className="dim empty-strat">
+                Describe your strategy above and hit Analyze, or open the AI Market Strategy tab to generate one from live market analysis.
+              </p>
+            )}
+          </div>
+          {chartPair && <PriceChart pair={chartPair} symbol={chartPair.symbol} tf={tf} onTfChange={setTf} />}
+        </section>
+      )}
 
       <input ref={fileRef} type="file" multiple hidden
         onChange={(e) => { const picked = [...e.target.files]; e.target.value = ''; pickFiles(picked); }} />
+
+      {toast && <div className="toast"><Check size={14} /> {toast}</div>}
     </div>
   );
 }

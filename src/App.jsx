@@ -13,6 +13,7 @@ import SessionsPage from './pages/SessionsPage';
 import SettingsPage from './pages/SettingsPage';
 import { engine } from './data/marketEngine';
 import { loadSettings, subscribeSettings } from './data/settings';
+import { loadLibrary } from './data/strategyBook';
 import { syncTvFeed } from './data/tvClient';
 import { tickSignals } from './data/signalEngine';
 import { startTradeSync } from './data/persistence';
@@ -36,6 +37,7 @@ function Layout() {
   useEffect(() => {
     const unsub = engine.subscribe(setPairs);
     engine.start();
+    engine.syncStrategies(loadLibrary()); // armed books trade even if the page is never opened
     syncTvFeed();
     const unsubSettings = subscribeSettings(() => syncTvFeed());
     const sigTimer = setInterval(() => { void tickSignals(); }, 1000);

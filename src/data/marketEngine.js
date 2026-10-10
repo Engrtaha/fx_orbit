@@ -556,7 +556,7 @@ class MarketEngine {
   // ── Custom strategy execution ──────────────────────────────────────────────
   syncStrategies(list) {
     this.strategies = list;
-    const ids = new Set(list.filter((x) => x.active).map((x) => x.id));
+    const ids = new Set(list.filter((x) => x.armed).map((x) => x.id));
     for (const [key, tradeId] of [...this.strategyOpen]) {
       if (!ids.has(key.split(':')[0])) this.strategyOpen.delete(key);
       else {
@@ -573,7 +573,7 @@ class MarketEngine {
     if (closes.length < 30) return;
     const hour = new Date().getUTCHours();
     for (const st of this.strategies) {
-      if (!st.active) continue;
+      if (!st.armed) continue;
       if (st.pair !== s.symbol) continue;
       if (this.strategyOpen.has(`${st.id}:${s.symbol}`)) continue;
 

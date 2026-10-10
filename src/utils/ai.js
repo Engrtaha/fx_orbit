@@ -127,6 +127,19 @@ export function attachmentContent(prompt, files, { vision = true } = {}) {
   ];
 }
 
+// One OpenAI-compatible chat call for every flow in the app. Content parts may
+// be a string or the multimodal array built by attachmentContent().
+export async function aiChat(settings, messages, { temperature = 0.2 } = {}) {
+  const res = await fetch(`${settings.aiBaseUrl || 'https://api.openai.com/v1'}/chat/completions`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...aiAuthHeaders(settings) },
+    body: JSON.stringify({ model: settings.aiModel || 'gpt-4o-mini', temperature, messages }),
+  });
+  if (!res.ok) throw new Error(`AI API responded ${res.status}`);
+  const data = await res.json();
+  return data.choices?.[0]?.message?.content ?? '';
+}
+
 export function parseJsonLoose(text) {
   const m = text.match(/\{[\s\S]*\}/);
   if (!m) return null;
