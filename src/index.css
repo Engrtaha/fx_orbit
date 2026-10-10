@@ -879,7 +879,15 @@ table.watch { width: 100%; border-collapse: collapse; }
 }
 .strat-page { max-width: 1180px; margin: 0 auto; width: 100%; }
 .strat-lead { margin: 0; font-size: 12.5px; color: var(--muted); }
-.strat-input { padding: 20px; display: flex; flex-direction: column; gap: 14px; }
+.strat-input { position: relative; padding: 20px; display: flex; flex-direction: column; gap: 14px; }
+.strat-input.dragging { border-color: rgba(34, 211, 238, 0.5); }
+.drop-hint {
+  position: absolute; inset: 10px; z-index: 6; pointer-events: none;
+  display: flex; align-items: center; justify-content: center; gap: 9px;
+  border: 1.5px dashed rgba(34, 211, 238, 0.6); border-radius: 14px;
+  background: rgba(5, 16, 26, 0.86); color: var(--cyan);
+  font-size: 12.5px; font-weight: 600;
+}
 .strat-desc {
   min-height: 104px; resize: vertical;
   font-family: var(--ui); font-size: 12.5px; line-height: 1.65;
@@ -891,15 +899,27 @@ table.watch { width: 100%; border-collapse: collapse; }
 .attach-label { display: flex; flex-direction: column; gap: 2px; }
 .attach-label .k { font-size: 12px; font-weight: 600; color: var(--ink); }
 .attach-label .sub { font-size: 10.5px; color: var(--faint); }
+.attach-actions { display: flex; gap: 8px; flex-shrink: 0; }
 .file-chips { display: flex; flex-wrap: wrap; gap: 8px; }
 .file-chip {
   display: inline-flex; align-items: center; gap: 8px;
-  font-size: 11px; color: #c4d0e6; max-width: 240px;
+  font-size: 11px; color: #c4d0e6; max-width: 330px;
   background: rgba(6, 10, 20, 0.6); border: 1px solid rgba(148, 163, 184, 0.18);
   padding: 5px 10px; border-radius: 9px;
 }
-.file-chip img { width: 22px; height: 22px; object-fit: cover; border-radius: 5px; flex-shrink: 0; }
+.file-chip img { width: 24px; height: 24px; object-fit: cover; border-radius: 5px; flex-shrink: 0; }
+.file-chip > svg { color: var(--muted); flex-shrink: 0; }
 .file-chip span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.file-chip .chip-name { max-width: 150px; font-weight: 600; color: var(--ink); }
+.file-chip .chip-meta { overflow: visible; font-size: 9.5px; color: var(--faint); }
+.file-chip .chip-badge {
+  overflow: visible; flex-shrink: 0; padding: 1px 5px; border-radius: 5px;
+  font-size: 8.5px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase;
+  color: #f0b429; background: rgba(240, 180, 41, 0.12); border: 1px solid rgba(240, 180, 41, 0.3);
+}
+.file-chip.kind-video { border-color: rgba(139, 92, 246, 0.34); }
+.file-chip.kind-text { border-color: rgba(45, 212, 167, 0.3); }
+.file-chip.kind-file { border-style: dashed; }
 .file-chip button {
   display: grid; place-items: center; background: transparent; border: none;
   color: var(--faint); cursor: pointer; padding: 2px; border-radius: 5px; flex-shrink: 0;
@@ -987,6 +1007,8 @@ select.inp { appearance: none; cursor: pointer; }
   color: #9fb0cc; background: rgba(148, 163, 184, 0.07); border-color: rgba(148, 163, 184, 0.18);
 }
 .btn.ghost:hover { color: var(--ink); border-color: rgba(148, 163, 184, 0.4); }
+.btn.ghost:disabled { opacity: 0.4; cursor: not-allowed; }
+.btn.ghost:disabled:hover { color: #9fb0cc; border-color: rgba(148, 163, 184, 0.18); }
 .btn.warn { color: #fbbf24; background: rgba(251, 191, 36, 0.1); border-color: rgba(251, 191, 36, 0.4); }
 .btn.sm { padding: 5px 12px; font-size: 11px; }
 .btn-row { display: flex; gap: 10px; flex-wrap: wrap; }

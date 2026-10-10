@@ -1,15 +1,52 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Brain, RefreshCw, ShieldCheck, FileText, Upload, Sparkles, X, AlertTriangle,
+  Image as ImageIcon, Video, File as FileIcon, Trash2,
 } from 'lucide-react';
 import { engine, fmt } from '../data/marketEngine';
 import { UNIVERSE, loadSettings, saveSettings } from '../data/settings';
 import PriceChart from '../components/PriceChart';
-import { downscale, parseJsonLoose, aiReady, aiAuthHeaders, aiSupportsVision } from '../utils/ai';
+import {
+  downscale, parseJsonLoose, aiReady, aiAuthHeaders, aiSupportsVision,
+  fileKind, readFile, clipText, videoFrames, attachmentContent,
+} from '../utils/ai';
+
+const MAX_FILES = 8;
+const MAX_MB = 25;
+const MAX_BYTES = MAX_MB * 1024 * 1024;
+
+const KIND_ICON = {
+  image: <ImageIcon size={13} />,
+  video: <Video size={13} />,
+  text: <FileText size={13} />,
+  file: <FileIcon size={13} />,
+};
+
+let attachmentSeq = 0;
+const sizeLabel = (n) => (n >= 1048576 ? `${(n / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(n / 1024))} KB`);
+
+// Everything the model can actually read: pixels for images, sampled frames for
+// video, raw text for documents. Anything else rides along as a label only.
+async function readAttachment(file) {
+  const kind = fileKind(file);
+  const att = { id: `att-${(attachmentSeq += 1)}`, name: file.name, kind, size: file.size };
+  if (kind === 'image') {
+    const raw = await readFile(file);
+    return { ...att, dataUrl: raw ? await downscale(raw) : null };
+  }
+  if (kind === 'video') {
+    const raw = await readFile(file);
+    return { ...att, frames: raw ? await videoFrames(raw) : [] };
+  }
+  if (kind === 'text') {
+    return { ...att, text: clipText(await readFile(file, 'text')) };
+  }
+  return { ...att, unsupported: true };
+}
 
 const SYSTEM_PROMPT = [
   'You are FxOrbit, a senior quantitative strategy analyst inside a trading terminal.',
-  'Analyze the trading strategy the user describes (text plus any attached screenshots) and respond with ONLY a JSON object (no markdown) shaped:',
+  'Analyze the trading strategy the user describes (text plus any attached screenshots, video frames, or document excerpts) and respond with ONLY a JSON object (no markdown) shaped:',
   '{"title":"short strategy name","pair":"best instrument symbol for it, e.g. XAU/USD",',
   '"analysis":["paragraph 1","paragraph 2"],"entryRules":["rule","rule","rule"],',
   '"riskRules":["rule","rule","rule"]}',
@@ -140,9 +177,10 @@ function simulatedStrategy(text, snapshot) {
 export default function StrategiesPage() {
   const [tab, setTab] = useState('own');
   const [desc, setDesc] = useState('');
-  const [files, setFiles] = useState([]); // {name, isImage, dataUrl?}
+  const [files, setFiles] = useState([]); // {id, name, kind, size, dataUrl?|frames?|text?|unsupported}
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
+  const [drag, setDrag] = useState(false);
   const [active, setActive] = useState(() => loadSettings().activeStrategyData ?? null);
   const [pairs, setPairs] = useState(() => engine.getSnapshot());
   const [tf, setTf] = useState('15m');
@@ -151,6 +189,7 @@ export default function StrategiesPage() {
   const [autoSet, setAutoSet] = useState(() => new Set(loadSettings().autoTrade));
   const fileRef = useRef(null);
   const hasKey = aiReady(loadSettings());
+  const visionOk = aiSupportsVision(loadSettings());
 
   useEffect(() => engine.subscribe((list) => setPairs(list)), []);
 
@@ -162,20 +201,26 @@ export default function StrategiesPage() {
   };
 
   const pickFiles = async (list) => {
-    const added = [];
-    for (const file of list ?? []) {
-      const item = { name: file.name, isImage: file.type.startsWith('image/') };
-      if (item.isImage) {
-        const raw = await new Promise((res) => {
-          const r = new FileReader();
-          r.onload = () => res(r.result);
-          r.readAsDataURL(file);
-        });
-        item.dataUrl = await downscale(raw);
+    // Copy before any await: the input's FileList is emptied the moment its value resets.
+    const picked = [...(list ?? [])];
+    if (!picked.length) return;
+    const room = Math.max(0, MAX_FILES - files.length);
+    const kept = [];
+    const skipped = [];
+    for (const file of picked) {
+      if (file.size > MAX_BYTES) {
+        skipped.push(`${file.name} is ${sizeLabel(file.size)} (limit ${MAX_MB} MB)`);
+      } else if (kept.length >= room) {
+        skipped.push(room === 0 ? `the ${MAX_FILES}-file limit is already full` : `only ${room} more fit under the ${MAX_FILES}-file limit`);
+        break;
+      } else {
+        kept.push(file);
       }
-      added.push(item);
     }
-    if (added.length) setFiles((prev) => [...prev, ...added]);
+    if (skipped.length) setError(`Not attached — ${skipped.join('; ')}`);
+    if (!kept.length) return;
+    const prepared = await Promise.all(kept.map(readAttachment));
+    setFiles((prev) => [...prev, ...prepared].slice(0, MAX_FILES));
   };
 
   const analyze = async () => {
@@ -185,12 +230,12 @@ export default function StrategiesPage() {
     const settings = loadSettings();
     try {
       if (aiReady(settings)) {
-        // Text-only local models reject image parts — analyze the text alone.
-        const attach = aiSupportsVision(settings);
-        const content = [
-          { type: 'text', text: `Analyze this trading strategy:\n\n${desc}` },
-          ...files.filter((f) => attach && f.dataUrl).map((f) => ({ type: 'image_url', image_url: { url: f.dataUrl } })),
-        ];
+        // Text-only local models reject image parts, so pixels are dropped for them.
+        const content = attachmentContent(
+          `Analyze this trading strategy:\n\n${desc}`,
+          files,
+          { vision: aiSupportsVision(settings) },
+        );
         const res = await fetch(`${settings.aiBaseUrl || 'https://api.openai.com/v1'}/chat/completions`, {
           method: 'POST',
           headers: {
@@ -272,9 +317,16 @@ export default function StrategiesPage() {
       </div>
 
       {tab === 'own' ? (
-        <section className="panel strat-input rise" style={{ animationDelay: '60ms' }}>
+        <section
+          className={`panel strat-input rise${drag ? ' dragging' : ''}`}
+          style={{ animationDelay: '60ms' }}
+          onDragOver={(e) => { e.preventDefault(); if (!drag) setDrag(true); }}
+          onDragLeave={(e) => { if (!e.currentTarget.contains(e.relatedTarget)) setDrag(false); }}
+          onDrop={(e) => { e.preventDefault(); setDrag(false); pickFiles(e.dataTransfer.files); }}
+        >
           <div className="panel-head">
             <span className="panel-title"><FileText size={14} /> Describe Your Strategy</span>
+            <span className="panel-sub">{files.length}/{MAX_FILES} attached</span>
           </div>
           <textarea
             className="inp strat-desc"
@@ -284,22 +336,39 @@ export default function StrategiesPage() {
           />
           <div className="attach-row">
             <div className="attach-label">
-              <span className="k">Upload screenshots or videos</span>
-              <span className="sub">optional, multiple allowed</span>
+              <span className="k">Upload screenshots, videos, or documents</span>
+              <span className="sub">optional · several at once · up to {MAX_MB} MB each · drag &amp; drop works too</span>
             </div>
-            <button className="btn ghost sm" onClick={() => fileRef.current?.click()}>
-              <Upload size={13} /> Add Files
-            </button>
+            <div className="attach-actions">
+              {files.length > 0 && (
+                <button className="btn ghost sm" onClick={() => { setFiles([]); setError(null); }}>
+                  <Trash2 size={13} /> Clear
+                </button>
+              )}
+              <button className="btn ghost sm" disabled={files.length >= MAX_FILES} onClick={() => fileRef.current?.click()}>
+                <Upload size={13} /> Add Files
+              </button>
+            </div>
           </div>
           {files.length > 0 && (
             <div className="file-chips">
-              {files.map((f, i) => (
-                <span key={`${f.name}-${i}`} className="file-chip">
-                  {f.isImage && f.dataUrl ? <img src={f.dataUrl} alt="" /> : <FileText size={13} />}
-                  <span>{f.name}</span>
-                  <button onClick={() => setFiles(files.filter((_, j) => j !== i))} title="Remove file"><X size={12} /></button>
-                </span>
-              ))}
+              {files.map((f) => {
+                const thumb = f.dataUrl ?? f.frames?.[0];
+                const detail = f.kind === 'video'
+                  ? `${f.frames?.length ?? 0} frame${f.frames?.length === 1 ? '' : 's'} sampled`
+                  : f.kind === 'text' ? 'text read' : f.kind === 'image' ? 'image' : 'not readable';
+                return (
+                  <span key={f.id} className={`file-chip kind-${f.kind}`}>
+                    {thumb ? <img src={thumb} alt="" /> : KIND_ICON[f.kind]}
+                    <span className="chip-name">{f.name}</span>
+                    <span className="chip-meta">{sizeLabel(f.size)} · {detail}</span>
+                    {f.unsupported && <b className="chip-badge">not sent</b>}
+                    <button onClick={() => setFiles((prev) => prev.filter((x) => x.id !== f.id))} title="Remove file">
+                      <X size={12} />
+                    </button>
+                  </span>
+                );
+              })}
             </div>
           )}
           <div className="btn-row">
@@ -310,11 +379,17 @@ export default function StrategiesPage() {
           {!hasKey && (
             <p className="ai-note">No AI API key configured — analysis runs in simulated mode. Add a key in Settings for real strategy analysis.</p>
           )}
+          {hasKey && !visionOk && files.some((f) => f.kind === 'image' || f.kind === 'video') && (
+            <p className="ai-note">Your current model is text-only — screenshots and video frames stay on this machine, but document text is still analyzed.</p>
+          )}
           {error && <p className="ai-error"><AlertTriangle size={13} /> {error}</p>}
           {busy && (
             <div className="ai-shimmer">
               <div className="sh-line w60" /><div className="sh-line w90" /><div className="sh-line w40" />
             </div>
+          )}
+          {drag && (
+            <div className="drop-hint"><Upload size={16} /> Drop pictures, videos, or files to attach</div>
           )}
         </section>
       ) : (
@@ -395,8 +470,8 @@ export default function StrategiesPage() {
         {chartPair && <PriceChart pair={chartPair} symbol={chartPair.symbol} tf={tf} onTfChange={setTf} />}
       </section>
 
-      <input ref={fileRef} type="file" accept="image/*,video/*" multiple hidden
-        onChange={(e) => { pickFiles(e.target.files); e.target.value = ''; }} />
+      <input ref={fileRef} type="file" multiple hidden
+        onChange={(e) => { const picked = [...e.target.files]; e.target.value = ''; pickFiles(picked); }} />
     </div>
   );
 }
