@@ -55,6 +55,15 @@ describe('ai provider helpers', () => {
     expect(aiSupportsVision({ aiProvider: 'bogus' })).toBe(true);
     expect(aiSupportsVision({})).toBe(true);
   });
+
+  it('opens the image path only for local models that carry a projector', () => {
+    expect(aiSupportsVision({ aiProvider: 'ollama', aiModel: 'minicpm-v:8b-2.6-q2_K' })).toBe(true);
+    expect(aiSupportsVision({ aiProvider: 'ollama', aiModel: 'qwen2.5vl:7b' })).toBe(true);
+    expect(aiSupportsVision({ aiProvider: 'ollama', aiModel: 'gemma3:4b' })).toBe(true);
+    expect(aiSupportsVision({ aiProvider: 'ollama', aiModel: 'llama3.2:latest' })).toBe(false);
+    expect(aiSupportsVision({ aiProvider: 'ollama', aiModel: 'gemma3:1b' })).toBe(false);
+    expect(aiSupportsVision({ aiProvider: 'ollama', aiModel: 'deepseek-r1:8b' })).toBe(false);
+  });
 });
 
 describe('fileKind', () => {

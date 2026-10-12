@@ -165,10 +165,15 @@ export const AI_PROVIDERS = {
   ollama: {
     label: 'Ollama (local)',
     base: 'http://localhost:11434/v1',
-    // Light default: on an 8 GB machine the 8B finance model (~5.4 GB resident)
-    // chokes the system — a 3B model loads in seconds and leaves RAM headroom.
-    model: 'llama3.2:latest',
+    // MiniCPM-V 2.6 (SigLIP-400M + Qwen2-7B) is the model the terminal targets:
+    // it reads chart screenshots, which the 3B text model cannot. The q2_K build
+    // is the one that fits an 8 GB machine — q4_K_M (`minicpm-v:latest`, 5.5 GB)
+    // sits alongside the ~5.4 GB finance model that used to choke this system,
+    // so llama3.2:latest stays installed as the fast fallback.
+    model: 'minicpm-v:8b-2.6-q2_K',
     keyRequired: false,
+    // The provider is text-first; only models carrying a projector take images.
+    // aiSupportsVision() decides per model name — see src/utils/ai.js.
     vision: false,
   },
 };

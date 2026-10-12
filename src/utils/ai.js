@@ -12,10 +12,19 @@ export function aiAuthHeaders(s = {}) {
     : {};
 }
 
-// Whether the active provider can accept image parts. Ollama catalogs mostly
-// text-only models here, so image flows degrade to simulated instead of 400ing.
+// Ollama serves image parts only for models that ship a vision projector, so
+// the provider alone can't answer this — the model name has to. Anything not
+// listed here stays text-only and its image flows degrade to simulated instead
+// of 400ing on an unsupported content part.
+export const VISION_MODEL_PATTERNS = [
+  /minicpm-?v/i, /minicpm[-\s]?om/i, /-vl\b/i, /vl[-:]\d/i, /llava/i, /moondream/i,
+  /pixtral/i, /llama4/i, /gemma3:(4|12|27)b/i, /vision[-\s]?lma/i,
+];
+
 export function aiSupportsVision(s = {}) {
-  return AI_PROVIDERS[aiProviderOf(s)].vision !== false;
+  if (AI_PROVIDERS[aiProviderOf(s)].vision !== false) return true;
+  const model = String(s.aiModel ?? '');
+  return VISION_MODEL_PATTERNS.some((re) => re.test(model));
 }
 
 export function downscale(dataUrl, max = 1024) {
