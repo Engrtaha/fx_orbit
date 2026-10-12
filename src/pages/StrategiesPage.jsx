@@ -1,13 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Brain, RefreshCw, ShieldCheck, FileText, Upload, Sparkles, X, AlertTriangle,
-  Image as ImageIcon, Video, File as FileIcon, Trash2, Pencil, GitMerge, Star, Check, Layers,
+  Image as ImageIcon, Video, File as FileIcon, Trash2, Pencil, GitMerge, Star, Check, Layers, Clock,
 } from 'lucide-react';
-import { engine, fmt } from '../data/marketEngine';
+import { engine, fmt, TIMEFRAMES } from '../data/marketEngine';
 import { UNIVERSE, loadSettings } from '../data/settings';
 import {
   ORIGINS, addStrategy, applyActive, armStrategy, findStrategy, loadLibrary, mergeStrategies,
-  normalizeStrategy, removeStrategy, saveLibrary, updateStrategy,
+  normalizeStrategy, removeStrategy, saveLibrary, timeframeLabel, updateStrategy,
 } from '../data/strategyBook';
 import PriceChart from '../components/PriceChart';
 import {
@@ -53,16 +53,21 @@ const SYSTEM_PROMPT = [
   'Analyze the trading strategy the user describes (text plus any attached screenshots, video frames, or document excerpts) and respond with ONLY a JSON object (no markdown) shaped:',
   '{"title":"short strategy name","pair":"best instrument symbol for it, e.g. XAU/USD",',
   '"analysis":["paragraph 1","paragraph 2"],"entryRules":["rule","rule","rule"],',
-  '"riskRules":["rule","rule","rule"]}',
+  '"riskRules":["rule","rule","rule"],"timeframes":["1m","5m"]}',
   'Mirror the direction the user describes exactly: a strategy that buys dips is a LONG strategy — never describe it as short.',
+  '"timeframes" lists the chart timeframes the strategy actually trades on (choose from 1m, 5m, 15m, 1H, 4H, 1D);',
+  'send an empty array or omit it when the strategy is not timeframe-specific.',
 ].join(' ');
 
 const MERGE_PROMPT = [
   'You are FxOrbit, a senior quantitative strategy analyst inside a trading terminal.',
   'Merge the two strategies below into ONE coherent strategy and respond with ONLY a JSON object (no markdown) shaped:',
   '{"title":"short name for the merged book","pair":"single instrument symbol",',
-  '"analysis":["paragraph 1","paragraph 2"],"entryRules":["rule"],"riskRules":["rule"]}',
+  '"analysis":["paragraph 1","paragraph 2"],"entryRules":["rule"],"riskRules":["rule"],',
+  '"timeframes":["1m","5m"]}',
   'Keep every rule that does not conflict. When two rules conflict, keep the stricter one and say why in the analysis.',
+  '"timeframes" is the union of the timeframes either parent trades (choose from 1m, 5m, 15m, 1H, 4H, 1D);',
+  'empty array when the merged book is not timeframe-specific.',
 ].join(' ');
 
 // A symbol the user explicitly named outranks whatever pair the model picks.
@@ -295,6 +300,7 @@ export default function StrategiesPage() {
     id: s.id,
     title: s.title,
     pair: s.pair,
+    timeframes: [...(s.timeframes ?? [])],
     analysis: s.analysis.join('\n'),
     entryRules: s.entryRules.join('\n'),
     riskRules: s.riskRules.join('\n'),
@@ -304,6 +310,7 @@ export default function StrategiesPage() {
     const next = write(updateStrategy(library, edit.id, {
       title: edit.title,
       pair: edit.pair,
+      timeframes: edit.timeframes,
       analysis: lines(edit.analysis),
       entryRules: lines(edit.entryRules),
       riskRules: lines(edit.riskRules),
@@ -586,6 +593,12 @@ export default function StrategiesPage() {
             {draft.simulated && <span className="draft-sim">simulated read</span>}
           </div>
           <p className="draft-sum">{draft.analysis[0]}</p>
+          {draft.timeframes.length > 0 && (
+            <p className="strat-tfs">
+              <Clock size={12} /> Generates trades on the {timeframeLabel(draft.timeframes)} timeframe{draft.timeframes.length > 1 ? 's' : ''} only —
+              signals for this strategy are produced there, not on other timeframes.
+            </p>
+          )}
           <div className="strat-cols">
             <div className="ai-block">
               <div className="k">Entry rules</div>
@@ -639,6 +652,9 @@ export default function StrategiesPage() {
                 <h3 className="strat-card-title">{s.title}</h3>
                 <div className="strat-card-meta">
                   <b className="pair">{s.pair}</b>
+                  {s.timeframes.length > 0 && (
+                    <span className="tfs">{s.timeframes.join(' · ')} only</span>
+                  )}
                   <span>{s.entryRules.length} entries</span>
                   <span>{s.riskRules.length} risk</span>
                   <span>{relTime(s.updatedAt)}</span>
@@ -686,6 +702,34 @@ export default function StrategiesPage() {
             </div>
           </div>
           <div className="field">
+            <label>Timeframes this strategy trades</label>
+            <div className="tf-chips">
+              {TIMEFRAMES.map((t) => {
+                const on = edit.timeframes.includes(t);
+                return (
+                  <button
+                    key={t}
+                    type="button"
+                    className={`tf-chip${on ? ' on' : ''}`}
+                    onClick={() => setEdit({
+                      ...edit,
+                      timeframes: on
+                        ? edit.timeframes.filter((x) => x !== t)
+                        : [...edit.timeframes, t],
+                    })}
+                  >
+                    {t}
+                  </button>
+                );
+              })}
+            </div>
+            <span className="tf-hint">
+              {edit.timeframes.length
+                ? `Signals for this strategy generate on ${timeframeLabel(edit.timeframes)} only.`
+                : 'None picked — the strategy trades every timeframe.'}
+            </span>
+          </div>
+          <div className="field">
             <label>Analysis — one paragraph per line</label>
             <textarea className="inp strat-desc" value={edit.analysis} onChange={(e) => setEdit({ ...edit, analysis: e.target.value })} />
           </div>
@@ -711,6 +755,14 @@ export default function StrategiesPage() {
               {active && <button className="btn ghost xs" onClick={() => activate('')}><X size={11} /> Unset</button>}
             </div>
             <h2 className="active-title">{active ? active.title : 'No active strategy yet'}</h2>
+            {active && (
+              <p className="strat-tfs">
+                <Clock size={12} />
+                {active.timeframes.length > 0
+                  ? `Generates trades on the ${timeframeLabel(active.timeframes)} timeframe${active.timeframes.length > 1 ? 's' : ''} only — signals for this strategy are produced there, not on other timeframes.`
+                  : 'Trades every timeframe — no chart restriction.'}
+              </p>
+            )}
             {active ? (
               <>
                 <div className="ai-block">

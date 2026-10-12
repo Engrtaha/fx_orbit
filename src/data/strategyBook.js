@@ -6,6 +6,7 @@
 // `activeStrategy` / `activeStrategyData` because the Dashboard, Portfolio and
 // Signals pages read it from there.
 
+import { TIMEFRAMES } from './marketEngine';
 import { loadSettings, loadStrategies, saveSettings, saveStrategies } from './settings';
 
 let seq = 0;
@@ -23,6 +24,47 @@ export const ORIGINS = {
   merged: 'Merged',
 };
 
+// A rule only counts as naming a timeframe when its line also talks about
+// charts or candles — risk phrasing like "exit after 4 hours of stagnation"
+// describes a duration, not a timeframe the strategy trades on.
+const TF_WORDS = [
+  ['1m', /\b(?:1[-\s]?min(?:ute)?s?|one[-\s]?min(?:ute)?s?|m1|1m)\b/i],
+  ['5m', /\b(?:5[-\s]?min(?:ute)?s?|five[-\s]?min(?:ute)?s?|m5|5m)\b/i],
+  ['15m', /\b(?:15[-\s]?min(?:ute)?s?|fifteen[-\s]?min(?:ute)?s?|m15|15m)\b/i],
+  ['1H', /\b(?:1[-\s]?h(?:ou)?rs?|one[-\s]?hour|h1|1h)\b/i],
+  ['4H', /\b(?:4[-\s]?h(?:ou)?rs?|four[-\s]?hour|h4|4h)\b/i],
+  ['1D', /\b(?:1[-\s]?day|one[-\s]?day|d1|1d)\b/i],
+];
+const TF_CONTEXT = /chart|timeframe|time[ -]?frame|\btf\b|candle|interval|\bbars?\b/i;
+
+// Reads the timeframes a strategy trades straight out of its own rules, so a
+// book saved before the field existed still restricts itself. The narrative
+// analysis is skipped on purpose: higher-timeframe filters ("watch the trend
+// on the four-hour chart") live there and are context, not execution.
+export function detectTimeframes(s) {
+  const title = String(s?.title ?? '');
+  const rules = [...toList(s?.entryRules), ...toList(s?.riskRules)];
+  const hits = TF_WORDS
+    .filter(([, re]) => re.test(title) || rules.some((l) => re.test(l) && TF_CONTEXT.test(l)))
+    .map(([t]) => t);
+  return hits.length ? TIMEFRAMES.filter((t) => hits.includes(t)) : null;
+}
+
+// "1m and 5m" / "1m, 5m and 15m" — every user-facing TF sentence reads this way.
+export const timeframeLabel = (list) => (list.length > 2
+  ? `${list.slice(0, -1).join(', ')} and ${list[list.length - 1]}`
+  : list.join(' and '));
+
+// The timeframes a strategy may trade on: an explicit list wins, a record
+// without one falls back to its own rule text, and "no restriction found"
+// means every timeframe. Always returns a non-empty, ordered subset.
+export function allowedTimeframes(s) {
+  const explicit = Array.isArray(s?.timeframes)
+    ? TIMEFRAMES.filter((t) => s.timeframes.includes(t))
+    : detectTimeframes(s);
+  return explicit?.length ? explicit : TIMEFRAMES;
+}
+
 // One shape for everything the rest of the app touches, so a half-written model
 // response or a legacy record can't leak undefined arrays into the UI.
 export function normalizeStrategy(s = {}) {
@@ -36,6 +78,9 @@ export function normalizeStrategy(s = {}) {
     riskRules: toList(s.riskRules),
     origin: ORIGINS[s.origin] ? s.origin : 'manual',
     parents: toList(s.parents),
+    timeframes: Array.isArray(s.timeframes)
+      ? TIMEFRAMES.filter((t) => s.timeframes.includes(t))
+      : (detectTimeframes(s) ?? []),
     armed: !!s.armed,
     simulated: !!s.simulated,
     createdAt: Number.isFinite(s.createdAt) ? s.createdAt : stamp,
@@ -85,6 +130,11 @@ const shortTitle = (t) => t.replace(/\s+strategy$/i, '').trim() || t;
 export function mergeStrategies(a, b) {
   const samePair = a.pair === b.pair;
   const union = (x, y, cap = 8) => [...new Set([...x, ...y])].slice(0, cap);
+  // Either parent being timeframe-agnostic makes the merge agnostic too: its
+  // setups were valid on every chart, so restricting the union would drop them.
+  const tfUnion = a.timeframes?.length && b.timeframes?.length
+    ? TIMEFRAMES.filter((t) => a.timeframes.includes(t) || b.timeframes.includes(t))
+    : [];
   return normalizeStrategy({
     title: `${shortTitle(a.title)} × ${shortTitle(b.title)} Merge`,
     pair: a.pair, // one book trades one pair; a disagreement is noted below
@@ -97,6 +147,7 @@ export function mergeStrategies(a, b) {
     ].filter(Boolean),
     entryRules: union(a.entryRules, b.entryRules),
     riskRules: union(a.riskRules, b.riskRules),
+    timeframes: tfUnion,
     origin: 'merged',
     parents: [a.id, b.id],
   });

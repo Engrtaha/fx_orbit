@@ -105,6 +105,75 @@ describe('mergeStrategies', () => {
   });
 });
 
+describe('strategy timeframes', () => {
+  const dipHunter = {
+    title: 'Dip Hunter Strategy',
+    pair: 'XAU/USD',
+    analysis: [
+      'Waiting for a candlestick pattern on the one-minute chart, watching the trend '
+      + 'on the four-hour chart and switching to the five-minute chart for the FVG inversion.',
+    ],
+    entryRules: [
+      'Low of previous 1-minute candle is broken',
+      'Green candle on one-minute chart',
+      'Inversion of FVG indicator on five-minute chart',
+    ],
+    riskRules: ['Stop loss above high of previous day'],
+  };
+
+  it('reads the traded timeframes out of the rules themselves', () => {
+    expect(book.detectTimeframes(dipHunter)).toEqual(['1m', '5m']);
+  });
+
+  it('skips a higher-timeframe filter that only lives in the analysis prose', () => {
+    expect(book.detectTimeframes({ ...dipHunter, analysis: ['watch the four-hour chart for trend'] })).toEqual(['1m', '5m']);
+    expect(book.detectTimeframes({ ...dipHunter, entryRules: [...dipHunter.entryRules, 'watch the four-hour chart for trend'] })).toEqual(['1m', '5m', '4H']);
+  });
+
+  it('does not mistake risk-rule durations for timeframes', () => {
+    const s = { title: 'Momentum', entryRules: ['exit after 4 hours of stagnation'], riskRules: ['daily loss cap of 3%'] };
+    expect(book.detectTimeframes(s)).toBeNull();
+  });
+
+  it('needs a chart context word in the rule before counting a timeframe', () => {
+    expect(book.detectTimeframes({ title: 'Scalper', entryRules: ['enter on 5m'] })).toBeNull();
+    expect(book.detectTimeframes({ title: 'Scalper', entryRules: ['enter on the 5m bar'] })).toEqual(['5m']);
+  });
+
+  it('counts a timeframe named in the title without any context word', () => {
+    expect(book.detectTimeframes({ title: '15m Momentum Rider', entryRules: ['EMA cross'] })).toEqual(['15m']);
+  });
+
+  it('stores the detection on normalize and lets an explicit list win', () => {
+    expect(book.normalizeStrategy(dipHunter).timeframes).toEqual(['1m', '5m']);
+    expect(book.normalizeStrategy({ ...dipHunter, timeframes: ['5m'] }).timeframes).toEqual(['5m']);
+    expect(book.normalizeStrategy({ ...dipHunter, timeframes: [] }).timeframes).toEqual([]);
+    expect(book.normalizeStrategy({ title: 'T', timeframes: ['5m', '2h', 'nope'] }).timeframes).toEqual(['5m']);
+  });
+
+  it('allowedTimeframes always returns a usable, ordered list', () => {
+    expect(book.allowedTimeframes(null)).toEqual(['1m', '5m', '15m', '1H', '4H', '1D']);
+    expect(book.allowedTimeframes({})).toEqual(['1m', '5m', '15m', '1H', '4H', '1D']);
+    expect(book.allowedTimeframes({ timeframes: [] })).toEqual(['1m', '5m', '15m', '1H', '4H', '1D']);
+    expect(book.allowedTimeframes(dipHunter)).toEqual(['1m', '5m']);
+    expect(book.allowedTimeframes({ ...dipHunter, timeframes: ['1m'] })).toEqual(['1m']);
+  });
+
+  it('formats a timeframe list the way the pages say it', () => {
+    expect(book.timeframeLabel(['1m'])).toBe('1m');
+    expect(book.timeframeLabel(['1m', '5m'])).toBe('1m and 5m');
+    expect(book.timeframeLabel(['1m', '5m', '15m'])).toBe('1m, 5m and 15m');
+  });
+
+  it('merges the union of restricted parents, and stays open when either is', () => {
+    const a = seed({ id: 'a', entryRules: ['enter on the 1m candle'] });
+    const b = seed({ id: 'b', entryRules: ['enter on the 15m candle'] });
+    const open = seed({ id: 'c' });
+    expect(book.mergeStrategies(a, b).timeframes).toEqual(['1m', '15m']);
+    expect(book.mergeStrategies(a, open).timeframes).toEqual([]);
+  });
+});
+
 describe('applyActive', () => {
   it('mirrors the chosen strategy into settings for the other pages', () => {
     const list = [seed({ id: 'a', title: 'Chosen Book' })];

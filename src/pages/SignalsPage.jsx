@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useState } from 'react';
 import {
-  Zap, ChevronDown, ArrowDownRight, ArrowUpRight, Loader2, Minus, Radio, History, Moon,
+  Zap, ChevronDown, ArrowDownRight, ArrowUpRight, Loader2, Minus, Radio, History, Moon, Clock,
 } from 'lucide-react';
 import { engine, fmt, marketClosed, reopenLabel, TIMEFRAMES } from '../data/marketEngine';
 import { loadSettings } from '../data/settings';
+import { allowedTimeframes, timeframeLabel } from '../data/strategyBook';
 import {
   generateAiSignal, saveSignal, activeSignals, recentOutcomes, subscribeSignals, signalProgress,
 } from '../data/signalEngine';
@@ -45,6 +46,12 @@ export default function SignalsPage() {
   const strategyName = settings.activeStrategy || 'AI Best';
   const subtitleStrategy = mode === 'my' ? strategyName : 'AI Best Strategy';
 
+  // A strategy that names its own timeframes limits where its signals may be
+  // generated; every other case (AI Best, no strategy, no TFs named) is free.
+  const allowedTfs = mode === 'my' ? allowedTimeframes(settings.activeStrategyData) : TIMEFRAMES;
+  const tfLocked = allowedTfs.length < TIMEFRAMES.length;
+  const effTf = allowedTfs.includes(tf) ? tf : allowedTfs[0];
+
   // The engine loads the universe asynchronously — until it arrives the raw
   // selection can point outside the snapshot, so resolve it against live pairs.
   const pair = pairs.some((p) => p.symbol === pairSel)
@@ -56,22 +63,25 @@ export default function SignalsPage() {
   const strategyRules = () => {
     const d = settings.activeStrategyData;
     if (!d || mode !== 'my') return null;
+    const tfNote = tfLocked
+      ? ` This strategy trades only the ${timeframeLabel(allowedTfs)} timeframe${allowedTfs.length > 1 ? 's' : ''}.`
+      : '';
     return {
       name: strategyName,
       rules: [d.analysis, d.entryRules, d.riskRules]
         .flat()
         .filter(Boolean)
         .join(' ')
-        .slice(0, 500),
+        .slice(0, 500) + tfNote,
     };
   };
 
   const generate = async () => {
-    if (!state || busy || closed.closed) return;
+    if (!state || busy || closed.closed || !allowedTfs.includes(effTf)) return;
     setBusy(true);
     try {
       const rules = strategyRules();
-      const r = await generateAiSignal(pair, tf, rules);
+      const r = await generateAiSignal(pair, effTf, rules);
       if (r) {
         const enriched = { ...r, strategyRules: rules?.rules ?? null };
         if (enriched.side !== 'WAIT' && enriched.sl != null && enriched.tp != null) {
@@ -105,11 +115,29 @@ export default function SignalsPage() {
         </div>
 
         <div className="sig-select-wrap">
-          <select className="sig-select" value={tf} onChange={(e) => setTf(e.target.value)}>
-            {TIMEFRAMES.map((t) => <option key={t} value={t}>{t} timeframe</option>)}
+          <select className="sig-select" value={effTf} onChange={(e) => setTf(e.target.value)}>
+            {TIMEFRAMES.map((t) => {
+              const ok = allowedTfs.includes(t);
+              return (
+                <option key={t} value={t} disabled={!ok}>
+                  {t} timeframe{ok ? '' : ` — outside ${subtitleStrategy}`}
+                </option>
+              );
+            })}
           </select>
           <ChevronDown size={16} className="sig-caret" />
         </div>
+
+        {tfLocked && (
+          <p className="sig-tf-note">
+            <Clock size={13} />
+            <span>
+              <b>{strategyName}</b> generates trades on the{' '}
+              <b>{timeframeLabel(allowedTfs)}</b> timeframe{allowedTfs.length > 1 ? 's' : ''} only —
+              not on other timeframes.
+            </span>
+          </p>
+        )}
 
         <div className="sig-mode">
           <button className={`mode-btn${mode === 'my' ? ' on' : ''}`} onClick={() => setMode('my')}>My Strategy</button>
