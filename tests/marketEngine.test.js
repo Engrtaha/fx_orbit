@@ -71,7 +71,7 @@ describe('trade lifecycle', () => {
     expect(t.status).toBe('closed');
     expect(t.exitReason).toBe('TP Hit');
     expect(t.pips).toBe(20);
-    expect(t.pnl).toBe(20);
+    expect(t.pnl).toBeCloseTo(t.pips * (t.lots / 0.1), 6);
   });
 
   it('closes SELL trades at stop loss with negative pips', () => {
@@ -108,6 +108,49 @@ describe('trade lifecycle', () => {
     expect(stats.netPnl).toBeCloseTo(+closed.reduce((a, x) => a + x.pnl, 0).toFixed(2), 2);
     const wins = closed.filter((x) => x.pnl > 0).length;
     expect(stats.winRate).toBe(Math.round((wins / closed.length) * 100));
+  });
+});
+
+describe('risk-based position sizing', () => {
+  const big = () => seedStorage({ pairs: ['US100', 'XAU/USD'], defaultPair: 'XAU/USD', initialBalance: 100000 });
+
+  it('risks the same slice of equity whatever the stop width', () => {
+    big();
+    const eq = engine.accountEquity();
+    for (const slPips of [25, 60, 237]) {
+      const loss = (engine.riskLots(slPips) / 0.1) * slPips; // $ at a stop-out
+      expect(Math.abs(loss - eq * 0.01) / (eq * 0.01)).toBeLessThan(0.02); // 0.01 rounding
+    }
+  });
+
+  it('shrinks the position as the stop widens', () => {
+    big();
+    expect(engine.riskLots(237)).toBeLessThan(engine.riskLots(25));
+  });
+
+  it('opens the trade at the sized lot', () => {
+    big();
+    engine.setTvLive('XAU/USD', true);
+    const t = engine.openTrade({ symbol: 'XAU/USD', side: 'BUY', slPips: 40, tpPips: 80, source: 'Test' });
+    expect(t.lots).toBe(engine.riskLots(40));
+    engine.closeTrade(t, engine.getState('XAU/USD').mid, 'Manual cleanup');
+  });
+
+  it('never sizes below the smallest unit when the account is under water', () => {
+    seedStorage({ pairs: ['US100', 'XAU/USD'], defaultPair: 'XAU/USD', initialBalance: -5000 });
+    expect(engine.accountEquity()).toBeLessThan(0);
+    expect(engine.riskLots(30)).toBe(0.01);
+  });
+
+  it('caps what a paper-thin stop would otherwise demand', () => {
+    big();
+    expect(engine.riskLots(1)).toBe(10);
+  });
+
+  it('treats a missing or nonsense stop as the smallest unit', () => {
+    big();
+    expect(engine.riskLots(0)).toBe(0.01);
+    expect(engine.riskLots(undefined)).toBe(0.01);
   });
 });
 

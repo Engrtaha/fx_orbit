@@ -3,11 +3,22 @@
 // tiny pub/sub. Data is simulated client-side; anchors sit near real market
 // levels so the terminal feels alive without an API key.
 
-import { UNIVERSE, loadSettings, saveSettings, loadStrategies } from './settings';
+import {
+  accountBalance, loadSettings, saveSettings, UNIVERSE, loadStrategies,
+} from './settings';
 
 export const TIMEFRAMES = ['1m', '5m', '15m', '1H', '4H', '1D'];
 
 const TF_MINUTES = { '1m': 1, '5m': 5, '15m': 15, '1H': 60, '4H': 240, '1D': 1440 };
+
+// closeTrade pays `pips * lots / 0.1`, so one lot is worth $10 per pip. A flat
+// 0.1 lot therefore turned a 237-point US100 stop into a $237 loss on a $126
+// account; sizing off the stop instead makes every stop-out cost RISK_PCT of
+// equity, which is what the strategy rules themselves ask for.
+export const RISK_PCT = 0.01;
+const MIN_LOTS = 0.01;
+const MAX_LOTS = 10;
+const PIP_VALUE_PER_LOT = 10;
 
 // Bars are bucketed on epoch-aligned boundaries (see genHistory), so the wall
 // clock alone says when the running candle closes: 4H bars at 00/04/08… UTC
@@ -538,12 +549,33 @@ class MarketEngine {
     const tp = entry + dir * tpPips * s.pip;
     const trade = {
       id: `T-${String(++this.tradeSeq).padStart(3, '0')}`,
-      symbol, side, lots: 0.1, entry, sl, tp,
+      symbol, side, lots: this.riskLots(slPips), entry, sl, tp,
       openedAt: Date.now(), openTick: this.tickCount,
       source, strategyId, status: 'open', note,
     };
     this.trades.unshift(trade);
     return trade;
+  }
+
+  realizedPnl() {
+    return +this.trades.reduce(
+      (sum, t) => (t.status === 'closed' ? sum + (Number(t.pnl) || 0) : sum), 0,
+    ).toFixed(2);
+  }
+
+  // The same number Portfolio and Dashboard show: the user's anchor plus the
+  // realized P&L of closed trades.
+  accountEquity() {
+    return accountBalance(loadSettings(), this.realizedPnl());
+  }
+
+  // A wide stop gets a smaller position, never a cheaper one. A blown account
+  // trades the smallest unit until the user resets their anchor in Portfolio.
+  riskLots(slPips) {
+    const stop = Number(slPips);
+    if (!Number.isFinite(stop) || stop <= 0) return MIN_LOTS;
+    const lots = (this.accountEquity() * RISK_PCT) / (stop * PIP_VALUE_PER_LOT);
+    return Math.min(MAX_LOTS, Math.max(MIN_LOTS, +lots.toFixed(2)));
   }
 
   closeTrade(t, exit, reason) {
