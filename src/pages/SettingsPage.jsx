@@ -22,6 +22,25 @@ export default function SettingsPage() {
   const [query, setQuery] = useState('');
 
   useEffect(() => subscribeTvStatus(setTvStatus), []);
+
+  // The picker has to know what is actually on this machine the moment the page
+  // opens — otherwise it offers a model that 404s until someone runs the pull.
+  // Re-checking keeps a finished download visible without a reload.
+  useEffect(() => {
+    if (settings.aiProvider !== 'ollama') return undefined;
+    let cancelled = false;
+    const check = async () => {
+      try {
+        const res = await fetch(`${settings.aiBaseUrl.replace(/\/$/, '')}/models`);
+        if (!res.ok) return;
+        const ids = ((await res.json())?.data ?? []).map((m) => m.id).filter(Boolean);
+        if (!cancelled && ids.length) setOllamaModels(ids);
+      } catch { /* Ollama is down — the pills simply show no install status */ }
+    };
+    void check();
+    const timer = setInterval(() => void check(), 15000);
+    return () => { cancelled = true; clearInterval(timer); };
+  }, [settings.aiProvider, settings.aiBaseUrl]);
   const [selected, setSelected] = useState(() => new Set(settings.pairs));
   const [resetArmed, setResetArmed] = useState(false);
   const [toast, setToast] = useState(null);
@@ -147,7 +166,26 @@ export default function SettingsPage() {
       const text = (data.choices?.[0]?.message?.content ?? '').trim().slice(0, 60);
       setAiTest({ ok: true, msg: `${settings.aiModel.trim() || prov.model} replied "${text || '(empty)'}" in ${((performance.now() - t0) / 1000).toFixed(1)} s` });
     } catch (err) {
-      setAiTest({ ok: false, msg: `${settings.aiModel.trim() || prov.model} test failed — ${err.message}. ${provider === 'ollama' ? 'Is Ollama running with this model pulled?' : 'Check the base URL and API key.'}` });
+      const model = settings.aiModel.trim() || prov.model;
+      let why = provider === 'ollama'
+        ? 'Is Ollama running with this model pulled?'
+        : `Check the base URL and API key. (${err.message})`;
+      if (provider === 'ollama') {
+        // A daemon that is down and a model that is still downloading both show
+        // up as a failure here — ask Ollama which one it is before reporting.
+        const listed = await fetch(`${settings.aiBaseUrl.replace(/\/$/, '')}/models`)
+          .then((r) => (r.ok ? r.json() : null))
+          .catch(() => null);
+        if (!listed) {
+          why = `Ollama is not reachable at ${settings.aiBaseUrl} — start it with: ollama serve`;
+        } else if (!(listed.data ?? []).some((m) => m.id === model)) {
+          why = `${model} is not on this machine yet — run: ollama pull ${model} `
+            + '(a download that is still in progress answers 404 until it finishes)';
+        } else {
+          why = `installed but it did not answer — ${err.message}. Try: ollama run ${model}`;
+        }
+      }
+      setAiTest({ ok: false, msg: `Test failed — ${why}` });
     } finally {
       setAiTesting(false);
     }
