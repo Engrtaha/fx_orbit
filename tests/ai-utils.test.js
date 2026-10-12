@@ -1,8 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import {
-  parseJsonLoose, aiProviderOf, aiReady, aiAuthHeaders, aiSupportsVision,
+  parseJsonLoose, aiProviderOf, aiReady, aiAuthHeaders, aiSupportsVision, modelSupportsVision,
   fileKind, clipText, attachmentContent,
 } from '../src/utils/ai.js';
+import { AI_PROVIDERS } from '../src/data/settings.js';
 
 describe('parseJsonLoose', () => {
   it('parses a plain JSON object', () => {
@@ -63,6 +64,15 @@ describe('ai provider helpers', () => {
     expect(aiSupportsVision({ aiProvider: 'ollama', aiModel: 'llama3.2:latest' })).toBe(false);
     expect(aiSupportsVision({ aiProvider: 'ollama', aiModel: 'gemma3:1b' })).toBe(false);
     expect(aiSupportsVision({ aiProvider: 'ollama', aiModel: 'deepseek-r1:8b' })).toBe(false);
+  });
+
+  it('keeps the preset catalog honest about what it can see', () => {
+    // A pill promising "reads chart screenshots" must be one the matcher really
+    // sends image parts for, or the vision flows silently stay simulated.
+    for (const m of AI_PROVIDERS.ollama.models) {
+      expect(modelSupportsVision(m.model)).toBe(m.vision);
+    }
+    expect(AI_PROVIDERS.ollama.model).toBe('llama3.2:latest'); // text model stays the default
   });
 });
 

@@ -21,10 +21,11 @@ export const VISION_MODEL_PATTERNS = [
   /pixtral/i, /llama4/i, /gemma3:(4|12|27)b/i, /vision[-\s]?lma/i,
 ];
 
+export const modelSupportsVision = (model) => VISION_MODEL_PATTERNS.some((re) => re.test(String(model ?? '')));
+
 export function aiSupportsVision(s = {}) {
   if (AI_PROVIDERS[aiProviderOf(s)].vision !== false) return true;
-  const model = String(s.aiModel ?? '');
-  return VISION_MODEL_PATTERNS.some((re) => re.test(model));
+  return modelSupportsVision(s.aiModel);
 }
 
 export function downscale(dataUrl, max = 1024) {

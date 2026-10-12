@@ -792,6 +792,16 @@ table.watch { width: 100%; border-collapse: collapse; }
   color: #06202b; background: linear-gradient(120deg, #22d3ee, #67e8f9);
   border-color: transparent; box-shadow: 0 0 16px rgba(34, 211, 238, 0.35);
 }
+/* model picker pills carry a caption, so they sit as small cards, not chips */
+.model-pills { flex-wrap: wrap; align-items: stretch; }
+.model-pills .pill {
+  display: flex; flex-direction: column; align-items: flex-start; gap: 3px;
+  text-align: left; padding: 9px 16px; border-radius: 12px;
+}
+.model-pills .pill b { font-family: var(--disp); font-size: 12.5px; font-weight: 700; }
+.model-pills .pill-note { font-size: 10.5px; font-weight: 500; color: var(--faint); }
+.model-pills .pill:hover .pill-note { color: var(--muted); }
+.model-pills .pill.active .pill-note { color: rgba(6, 32, 43, 0.72); }
 .side-badge {
   font-size: 10px; font-weight: 800; letter-spacing: 0.08em;
   padding: 3px 9px; border-radius: 6px;

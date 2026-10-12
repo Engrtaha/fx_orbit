@@ -6,7 +6,7 @@ import {
 import { engine } from '../data/marketEngine';
 import { UNIVERSE, GROUPS, AI_PROVIDERS, loadSettings, saveSettings, resetSettings } from '../data/settings';
 import { testTvConnection, subscribeTvStatus, getTvStatus } from '../data/tvClient';
-import { aiProviderOf, aiAuthHeaders } from '../utils/ai';
+import { aiProviderOf, aiAuthHeaders, aiSupportsVision } from '../utils/ai';
 
 export default function SettingsPage() {
   const [settings, setSettings] = useState(() => loadSettings());
@@ -295,10 +295,45 @@ export default function SettingsPage() {
           </datalist>
           <span className="field-hint">
             {provider === 'ollama'
-              ? `Use any model you've pulled with ollama. Default: ${AI_PROVIDERS.ollama.model}`
+              ? 'Use any model you\'ve pulled with ollama. Default: '
+                + `${AI_PROVIDERS.ollama.model} — hit "Fetch installed models" to list what is on this machine.`
               : 'Any OpenAI-compatible chat model id, e.g. gpt-4o-mini, deepseek-chat.'}
           </span>
         </div>
+
+        {provider === 'ollama' && prov.models?.length > 0 && (
+          <div className="field">
+            <label>Which model to use</label>
+            <div className="pills model-pills">
+              {prov.models.map((m) => {
+                const pulled = ollamaModels.length > 0
+                  && ollamaModels.some((id) => id === m.model || id.split(':')[0] === m.model.split(':')[0]);
+                const chosen = settings.aiModel.trim() === m.model;
+                return (
+                  <button
+                    key={m.model}
+                    type="button"
+                    className={`pill${chosen ? ' active' : ''}`}
+                    onClick={() => { setSettings({ ...settings, aiModel: m.model }); setAiTest(null); }}
+                  >
+                    <b>{m.label}</b>
+                    <span className="pill-note">
+                      {m.note}
+                      {ollamaModels.length > 0 && (pulled ? ' · installed' : ` · not pulled — ollama pull ${m.model}`)}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+            <span className={`field-hint${aiSupportsVision(settings) ? ' ok' : ''}`}>
+              {aiSupportsVision(settings)
+                ? 'This model reads chart screenshots and uploaded images directly — the News screenshot flow '
+                  + 'and Strategy uploads send it real pixels.'
+                : 'This model is text-only — screenshot and image uploads fall back to the simulated desk read. '
+                  + 'Pick MiniCPM-V 2.6 to enable them.'}
+            </span>
+          </div>
+        )}
         {prov.keyRequired ? (
           <div className="field">
             <label>API Key</label>
@@ -318,7 +353,7 @@ export default function SettingsPage() {
         ) : (
           <span className="field-hint ok">
             Runs locally via Ollama — no API key, requests never leave this machine.
-            Start the server with <code>ollama serve</code>. Note: text-only local models can't read screenshots.
+            Start the server with <code>ollama serve</code>.
           </span>
         )}
         <div className="field">
