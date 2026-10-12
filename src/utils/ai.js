@@ -150,8 +150,29 @@ export async function aiChat(settings, messages, { temperature = 0.2 } = {}) {
   return data.choices?.[0]?.message?.content ?? '';
 }
 
+// Local models wrap JSON in prose and sometimes emit more than one object, so a
+// greedy first-{ to last-} span swallows the chatter between them and fails to
+// parse. Walk balanced objects instead and keep the first that is real JSON.
 export function parseJsonLoose(text) {
-  const m = text.match(/\{[\s\S]*\}/);
-  if (!m) return null;
-  try { return JSON.parse(m[0]); } catch { return null; }
+  const str = String(text ?? '');
+  const direct = [str.trim(), ...[...str.matchAll(/```(?:json)?\s*([\s\S]*?)```/g)].map((m) => m[1].trim())];
+  for (const c of direct) {
+    try { return JSON.parse(c); } catch { /* try the next shape */ }
+  }
+  let depth = 0;
+  let start = -1;
+  for (let i = 0; i < str.length; i++) {
+    const ch = str[i];
+    if (ch === '{') {
+      if (depth === 0) start = i;
+      depth += 1;
+    } else if (ch === '}') {
+      depth -= 1;
+      if (depth < 0) { depth = 0; start = -1; continue; }
+      if (depth === 0 && start >= 0) {
+        try { return JSON.parse(str.slice(start, i + 1)); } catch { start = -1; }
+      }
+    }
+  }
+  return null;
 }

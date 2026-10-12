@@ -10,6 +10,15 @@ describe('parseJsonLoose', () => {
     expect(parseJsonLoose('{"a":1,"b":"x"}')).toEqual({ a: 1, b: 'x' });
   });
 
+  it('survives a chatty local model reply', () => {
+    // prose whose closing brace sits AFTER the object is what used to break the
+    // greedy first-{ to last-} span.
+    expect(parseJsonLoose('Here is it: {"title":"T","rules":[]} — hope that helps! }')
+      ).toEqual({ title: 'T', rules: [] });
+    expect(parseJsonLoose('Sure! {"a":1}\nOr maybe {"b":2} instead').a).toBe(1);
+    expect(parseJsonLoose('no json at all, just } braces {')).toBeNull();
+  });
+
   it('parses JSON fenced in a markdown block', () => {
     const text = 'Here is the result:\n```json\n{"impact":"high","confidence":80}\n```\nHope that helps.';
     expect(parseJsonLoose(text)).toEqual({ impact: 'high', confidence: 80 });
