@@ -2,7 +2,9 @@ import { describe, expect, it, vi } from 'vitest';
 import { seedStorage } from './setup.js';
 
 seedStorage({ pairs: ['US100', 'XAU/USD'], defaultPair: 'XAU/USD' });
-const { engine, marketClosed, volatilityPips } = await import('../src/data/marketEngine.js');
+const {
+  engine, marketClosed, volatilityPips, TIMEFRAMES, barCloseIn, tfPeriodMs,
+} = await import('../src/data/marketEngine.js');
 const { UNIVERSE } = await import('../src/data/settings.js');
 
 engine.start();
@@ -166,5 +168,23 @@ describe('weekend market hours', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe('bar close countdown', () => {
+  it('gives every timeframe a period in milliseconds', () => {
+    expect(TIMEFRAMES.map(tfPeriodMs)).toEqual([60000, 300000, 900000, 3600000, 14400000, 86400000]);
+  });
+
+  it('counts down to the epoch-aligned boundary the candles roll on', () => {
+    expect(barCloseIn('1m', 75000)).toBe(45000);            // 15s into the minute
+    expect(barCloseIn('5m', 340000)).toBe(260000);          // 40s into the 5m bar
+    expect(barCloseIn('1D', Date.UTC(2026, 9, 12, 22, 0, 0))).toBe(7200000); // to midnight UTC
+    expect(barCloseIn('4H', Date.UTC(2026, 9, 12, 5, 30, 0))).toBe(9000000); // to 08:00 UTC
+  });
+
+  it('hands a brand new bar the full period', () => {
+    expect(barCloseIn('15m', 900000)).toBe(900000);
+    expect(barCloseIn('1m', 0)).toBe(60000);
   });
 });

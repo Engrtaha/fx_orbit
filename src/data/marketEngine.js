@@ -9,6 +9,16 @@ export const TIMEFRAMES = ['1m', '5m', '15m', '1H', '4H', '1D'];
 
 const TF_MINUTES = { '1m': 1, '5m': 5, '15m': 15, '1H': 60, '4H': 240, '1D': 1440 };
 
+// Bars are bucketed on epoch-aligned boundaries (see genHistory), so the wall
+// clock alone says when the running candle closes: 4H bars at 00/04/08… UTC
+// and daily bars at midnight UTC.
+export const tfPeriodMs = (tf) => (TF_MINUTES[tf] ?? 1) * 60000;
+
+export const barCloseIn = (tf, now = Date.now()) => {
+  const period = tfPeriodMs(tf);
+  return period - (now % period);
+};
+
 const CCY_COLORS = {
   EUR: ['#3b82f6', '#6366f1'], USD: ['#10b981', '#0d9488'], GBP: ['#8b5cf6', '#d946ef'],
   JPY: ['#f43f5e', '#fb7185'], CHF: ['#ef4444', '#f59e0b'], AUD: ['#f59e0b', '#f97316'],

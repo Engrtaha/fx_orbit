@@ -420,6 +420,43 @@ body::after {
   box-shadow: 0 0 18px rgba(34, 211, 238, 0.35);
 }
 
+/* ── candle-close countdown ────────────────────────────────────────────── */
+.bar-close {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding: 4px 18px 12px;
+}
+.bar-close .bc-k {
+  display: inline-flex; align-items: center; gap: 6px; white-space: nowrap;
+  font-size: 9.5px; font-weight: 800; letter-spacing: 0.12em; text-transform: uppercase;
+  color: var(--faint);
+}
+.bar-close .bc-k svg { color: var(--cyan); }
+.bc-cell {
+  flex: 1 1 96px; min-width: 92px; max-width: 152px; cursor: pointer;
+  display: flex; flex-direction: column; align-items: flex-start; gap: 5px;
+  padding: 7px 10px 8px; border-radius: 11px;
+  border: 1px solid var(--border); background: rgba(148, 163, 184, 0.045);
+  transition: all 0.18s ease;
+}
+.bc-cell:hover { border-color: rgba(34, 211, 238, 0.4); transform: translateY(-1px); }
+.bc-cell.on { border-color: rgba(34, 211, 238, 0.55); background: rgba(34, 211, 238, 0.07); }
+.bc-tf {
+  font-family: var(--disp); font-size: 10px; font-weight: 700;
+  letter-spacing: 0.1em; text-transform: uppercase; color: var(--faint);
+}
+.bc-cell.on .bc-tf { color: var(--cyan); }
+.bc-time {
+  font-family: var(--mono); font-size: 15px; font-weight: 700; color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+.bc-bar { width: 100%; height: 3px; border-radius: 99px; overflow: hidden; background: rgba(148, 163, 184, 0.14); }
+.bc-bar i {
+  display: block; height: 100%; border-radius: 99px;
+  background: linear-gradient(90deg, var(--cyan), var(--green));
+  transition: width 0.9s linear;
+}
+.bar-close.shut .bc-time, .bar-close.shut .bc-k svg { color: var(--faint); }
+
 .stat-tiles {
   display: grid;
   grid-template-columns: repeat(5, minmax(0, 1fr));

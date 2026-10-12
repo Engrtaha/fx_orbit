@@ -1,9 +1,11 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   createChart, CandlestickSeries, HistogramSeries, LineSeries, ColorType, CrosshairMode,
 } from 'lightweight-charts';
-import { Activity } from 'lucide-react';
-import { TIMEFRAMES, engine, fmt, volatilityPips } from '../data/marketEngine';
+import { Activity, Timer } from 'lucide-react';
+import {
+  TIMEFRAMES, barCloseIn, engine, fmt, marketClosed, tfPeriodMs, volatilityPips,
+} from '../data/marketEngine';
 import { loadSettings } from '../data/settings';
 import { fetchTvHistory } from '../data/tvClient';
 import { chartCapture } from '../data/chartCapture';
@@ -19,6 +21,51 @@ function emaSeries(candles, period) {
     prev = i === 0 ? c.close : c.close * k + prev * (1 - k);
     return { time: c.time, value: prev };
   });
+}
+
+// "47s" for a moment, "12:04" within the hour, "2h 04m" beyond it.
+const closeLabel = (ms) => {
+  const s = Math.max(0, Math.round(ms / 1000));
+  if (s < 60) return `${s}s`;
+  if (s < 3600) return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+  return `${Math.floor(s / 3600)}h ${String(Math.floor((s % 3600) / 60)).padStart(2, '0')}m`;
+};
+
+// Wall-clock countdown to the next candle close on every timeframe. The bars
+// are epoch-aligned, so this needs no feed — only the tape being open.
+function BarCountdown({ tf, onTfChange }) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, []);
+  const closed = marketClosed(new Date(now)).closed;
+  return (
+    <div className={`bar-close${closed ? ' shut' : ''}`}>
+      <span className="bc-k">
+        <Timer size={11} /> {closed ? 'Market closed — bars are paused' : 'Bar closes in'}
+      </span>
+      {TIMEFRAMES.map((t) => {
+        const period = tfPeriodMs(t);
+        const left = barCloseIn(t, now);
+        return (
+          <button
+            key={t}
+            type="button"
+            className={`bc-cell${t === tf ? ' on' : ''}`}
+            onClick={() => onTfChange(t)}
+            title={`Show the ${t} chart`}
+          >
+            <span className="bc-tf">{t}</span>
+            <span className="bc-time">{closed ? '—' : closeLabel(left)}</span>
+            <span className="bc-bar">
+              <i style={{ width: closed ? 0 : `${Math.round(((period - left) / period) * 100)}%` }} />
+            </span>
+          </button>
+        );
+      })}
+    </div>
+  );
 }
 
 export default function PriceChart({ pair, symbol, tf, onTfChange, signal }) {
@@ -219,6 +266,8 @@ export default function PriceChart({ pair, symbol, tf, onTfChange, signal }) {
           ))}
         </div>
       </div>
+
+      <BarCountdown tf={tf} onTfChange={onTfChange} />
 
       <div className="stat-tiles">
         <div className="stat-tile">
