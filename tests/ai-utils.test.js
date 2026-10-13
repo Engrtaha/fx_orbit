@@ -1,7 +1,7 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   parseJsonLoose, aiProviderOf, aiReady, aiAuthHeaders, aiSupportsVision, modelSupportsVision,
-  fileKind, clipText, attachmentContent,
+  fileKind, clipText, attachmentContent, unloadOtherOllamaModels,
 } from '../src/utils/ai.js';
 import { AI_PROVIDERS } from '../src/data/settings.js';
 
@@ -82,6 +82,40 @@ describe('ai provider helpers', () => {
       expect(modelSupportsVision(m.model)).toBe(m.vision);
     }
     expect(AI_PROVIDERS.ollama.model).toBe('llama3.2:latest'); // text model stays the default
+  });
+});
+
+describe('unloadOtherOllamaModels', () => {
+  const settings = { aiProvider: 'ollama', aiModel: 'minicpm-v:8b-2.6-q2_K', aiBaseUrl: 'http://localhost:11434/v1' };
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('stops every loaded model except the selected one, on the native API', async () => {
+    const calls = [];
+    vi.stubGlobal('fetch', vi.fn(async (url, opts = {}) => {
+      calls.push({ url: String(url), body: opts.body ? JSON.parse(opts.body) : null });
+      if (String(url).endsWith('/api/ps')) {
+        return { ok: true, json: async () => ({ models: [{ name: 'llama3.2:latest' }, { name: 'minicpm-v:8b-2.6-q2_K' }] }) };
+      }
+      return { ok: true, json: async () => ({ done: true }) };
+    }));
+    const stopped = await unloadOtherOllamaModels(settings);
+    expect(stopped).toEqual(['llama3.2:latest']);
+    const unload = calls.find((c) => c.url.endsWith('/api/generate'));
+    expect(unload.url).toBe('http://localhost:11434/api/generate'); // /v1 stripped
+    expect(unload.body).toEqual({ model: 'llama3.2:latest', keep_alive: 0 });
+    expect(calls.filter((c) => c.url.endsWith('/api/generate'))).toHaveLength(1);
+  });
+
+  it('does not touch the network for other providers', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => { throw new Error('must not be called'); }));
+    expect(await unloadOtherOllamaModels({ aiProvider: 'openai', aiModel: 'gpt-4o-mini', aiBaseUrl: 'https://api.openai.com/v1' })).toEqual([]);
+  });
+
+  it('stays silent when the daemon is unreachable or has nothing loaded', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => { throw new TypeError('Failed to fetch'); }));
+    expect(await unloadOtherOllamaModels(settings)).toEqual([]);
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, json: async () => ({ models: [] }) })));
+    expect(await unloadOtherOllamaModels(settings)).toEqual([]);
   });
 });
 

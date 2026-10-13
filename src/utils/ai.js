@@ -28,6 +28,40 @@ export function aiSupportsVision(s = {}) {
   return modelSupportsVision(s.aiModel);
 }
 
+// Ollama keeps every model it recently served resident for its keep-alive
+// window, so switching models would leave the old one eating RAM next to the
+// new one — two models at once on an 8 GB machine. This asks the daemon to
+// evict everything it has loaded except the model just selected. Only models
+// /api/ps reports as loaded are touched (a keep_alive:0 request to an unloaded
+// model would make Ollama load it just to unload it).
+export async function unloadOtherOllamaModels(settings) {
+  const base = String(settings?.aiBaseUrl ?? '').trim().replace(/\/+$/, '');
+  if (settings?.aiProvider !== 'ollama' || !/^https?:\/\//.test(base)) return [];
+  const root = base.replace(/\/v1$/, '');
+  try {
+    const res = await fetch(`${root}/api/ps`);
+    if (!res.ok) return [];
+    const data = await res.json();
+    const keep = String(settings.aiModel ?? '').trim();
+    const stopped = [];
+    for (const m of data?.models ?? []) {
+      const name = String(m?.name ?? '');
+      if (!name || name === keep) continue;
+      try {
+        const un = await fetch(`${root}/api/generate`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ model: name, keep_alive: 0 }),
+        });
+        if (un.ok) stopped.push(name);
+      } catch { /* daemon went away mid-way — nothing to report */ }
+    }
+    return stopped;
+  } catch {
+    return [];
+  }
+}
+
 export function downscale(dataUrl, max = 1024) {
   return new Promise((resolve) => {
     const img = new Image();

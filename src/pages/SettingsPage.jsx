@@ -6,7 +6,7 @@ import {
 import { engine } from '../data/marketEngine';
 import { UNIVERSE, GROUPS, AI_PROVIDERS, loadSettings, saveSettings, resetSettings } from '../data/settings';
 import { testTvConnection, subscribeTvStatus, getTvStatus } from '../data/tvClient';
-import { aiProviderOf, aiAuthHeaders, aiSupportsVision } from '../utils/ai';
+import { aiProviderOf, aiAuthHeaders, aiSupportsVision, unloadOtherOllamaModels } from '../utils/ai';
 
 export default function SettingsPage() {
   const [settings, setSettings] = useState(() => loadSettings());
@@ -191,14 +191,18 @@ export default function SettingsPage() {
     }
   };
 
-  const saveAiModel = () => {
-    saveSettings({
-      aiProvider: provider,
-      aiApiKey: settings.aiApiKey.trim(),
-      aiModel: settings.aiModel.trim() || prov.model,
-      aiBaseUrl: settings.aiBaseUrl.trim() || prov.base,
-    });
-    notify('AI model settings saved');
+  const saveAiModel = async () => {
+    const model = settings.aiModel.trim() || prov.model;
+    const base = settings.aiBaseUrl.trim() || prov.base;
+    saveSettings({ aiProvider: provider, aiApiKey: settings.aiApiKey.trim(), aiModel: model, aiBaseUrl: base });
+    // Only one model should sit in RAM at a time: saving a choice evicts
+    // whatever else Ollama still has loaded from earlier runs.
+    const stopped = provider === 'ollama'
+      ? await unloadOtherOllamaModels({ aiProvider: provider, aiModel: model, aiBaseUrl: base })
+      : [];
+    notify(stopped.length
+      ? `Saved — stopped ${stopped.join(', ')}; only ${model} stays in memory`
+      : 'AI model settings saved');
   };
 
   const savePairs = () => {
