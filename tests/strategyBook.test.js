@@ -94,14 +94,41 @@ describe('mergeStrategies', () => {
     expect(merged.riskRules).toContain('daily loss cap 3%');
   });
 
-  it('caps the merged rule lists and flags a pair disagreement', () => {
+  it('keeps every parent rule instead of truncating the union', () => {
     const many = (p) => Array.from({ length: 9 }, (_, i) => `${p}${i}`);
     const merged = book.mergeStrategies(
       seed({ id: 'a', pair: 'US100', entryRules: many('a') }),
       seed({ id: 'b', pair: 'XAU/USD', entryRules: many('b') }),
     );
-    expect(merged.entryRules).toHaveLength(8);
+    expect(merged.entryRules).toHaveLength(18);
     expect(merged.analysis.join(' ')).toContain('different pairs');
+  });
+
+  it('keeps both directions when one parent is short and the other long', () => {
+    const merged = book.mergeStrategies(
+      seed({ id: 'a', entryRules: ['red candle confirms bearish trend, sell'], riskRules: ['stop above the swing'] }),
+      seed({ id: 'b', entryRules: ['green candle confirms bullish trend, buy'], riskRules: ['stop below the swing'] }),
+    );
+    expect(merged.entryRules.some((r) => /sell/i.test(r))).toBe(true);
+    expect(merged.entryRules.some((r) => /buy/i.test(r))).toBe(true);
+    expect(merged.analysis.join(' ')).toMatch(/both a long setup and a short setup/);
+  });
+
+  it('does not claim two-sidedness for same-direction parents', () => {
+    const merged = book.mergeStrategies(
+      seed({ id: 'a', entryRules: ['buy the dip'] }),
+      seed({ id: 'b', entryRules: ['buy the breakout'] }),
+    );
+    expect(merged.analysis.join(' ')).not.toMatch(/short setup/);
+  });
+});
+
+describe('bookDirections', () => {
+  it('reads the traded directions out of a book\'s own rules', () => {
+    expect(book.bookDirections({ entryRules: ['sell when red'], riskRules: [] })).toEqual(['bear']);
+    expect(book.bookDirections({ entryRules: ['buy when green'], riskRules: [] })).toEqual(['bull']);
+    expect(book.bookDirections({ entryRules: ['buy green'], riskRules: ['stop below for shorts'] })).toEqual(['bull', 'bear']);
+    expect(book.bookDirections({ entryRules: ['enter on FVG inversion'], riskRules: [] })).toEqual([]);
   });
 });
 

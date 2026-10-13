@@ -4,7 +4,7 @@ import {
 } from 'lucide-react';
 import { engine, fmt, marketClosed, reopenLabel, TIMEFRAMES } from '../data/marketEngine';
 import { loadSettings } from '../data/settings';
-import { allowedTimeframes, timeframeLabel } from '../data/strategyBook';
+import { allowedTimeframes, bookDirections, timeframeLabel } from '../data/strategyBook';
 import {
   generateAiSignal, saveSignal, activeSignals, recentOutcomes, subscribeSignals, signalProgress,
 } from '../data/signalEngine';
@@ -66,14 +66,18 @@ export default function SignalsPage() {
     const tfNote = tfLocked
       ? ` This strategy trades only the ${timeframeLabel(allowedTfs)} timeframe${allowedTfs.length > 1 ? 's' : ''}.`
       : '';
-    return {
-      name: strategyName,
-      rules: [d.analysis, d.entryRules, d.riskRules]
-        .flat()
-        .filter(Boolean)
-        .join(' ')
-        .slice(0, 500) + tfNote,
-    };
+    const dirs = bookDirections(d);
+    const orNote = dirs.includes('bull') && dirs.includes('bear')
+      ? ' This book holds both a long setup and a short setup: take the side whose conditions the live data actually fulfil.'
+      : '';
+    // The first analysis paragraph gives context; every entry and risk rule
+    // matters, so the whole rule text reaches the model instead of being cut.
+    const lead = String(d.analysis?.[0] ?? '').slice(0, 400);
+    const rules = [lead, ...(d.entryRules ?? []), ...(d.riskRules ?? [])]
+      .filter(Boolean)
+      .join(' ')
+      .slice(0, 2400);
+    return { name: strategyName, rules: rules + tfNote + orNote };
   };
 
   const generate = async () => {

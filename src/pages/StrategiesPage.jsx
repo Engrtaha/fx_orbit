@@ -6,7 +6,7 @@ import {
 import { engine, fmt, TIMEFRAMES } from '../data/marketEngine';
 import { UNIVERSE, loadSettings } from '../data/settings';
 import {
-  ORIGINS, addStrategy, applyActive, armStrategy, findStrategy, loadLibrary, mergeStrategies,
+  ORIGINS, addStrategy, applyActive, armStrategy, bookDirections, findStrategy, loadLibrary, mergeStrategies,
   normalizeStrategy, removeStrategy, saveLibrary, timeframeLabel, updateStrategy,
 } from '../data/strategyBook';
 import PriceChart from '../components/PriceChart';
@@ -61,11 +61,14 @@ const SYSTEM_PROMPT = [
 
 const MERGE_PROMPT = [
   'You are FxOrbit, a senior quantitative strategy analyst inside a trading terminal.',
-  'Merge the two strategies below into ONE coherent strategy and respond with ONLY a JSON object (no markdown) shaped:',
+  'Merge the two strategies below into ONE book that preserves BOTH parents\' setups. Respond with ONLY a JSON object (no markdown) shaped:',
   '{"title":"short name for the merged book","pair":"single instrument symbol",',
   '"analysis":["paragraph 1","paragraph 2"],"entryRules":["rule"],"riskRules":["rule"],',
   '"timeframes":["1m","5m"]}',
-  'Keep every rule that does not conflict. When two rules conflict, keep the stricter one and say why in the analysis.',
+  'Keep EVERY rule that does not conflict, from BOTH parents: the merged book fires when EITHER parent\'s setup is fulfilled.',
+  'When one parent trades long (bullish trend, green confirmation candle) and the other trades short (bearish trend, red confirmation candle), the merged book MUST contain BOTH a long setup and a short setup. Never reduce a two-sided book to one direction, and never copy only one parent.',
+  'When two rules genuinely conflict, keep the stricter one and explain why in the analysis.',
+  '"analysis" holds commentary; "entryRules" and "riskRules" hold the trade rules themselves.',
   '"timeframes" is the union of the timeframes either parent trades (choose from 1m, 5m, 15m, 1H, 4H, 1D);',
   'empty array when the merged book is not timeframe-specific.',
 ].join(' ');
@@ -358,15 +361,25 @@ export default function StrategiesPage() {
             { role: 'user', content: `Strategy A:\n${JSON.stringify(a, null, 1)}\n\nStrategy B:\n${JSON.stringify(b, null, 1)}` },
           ], { temperature: 0.1 });
           const parsed = parseJsonLoose(text);
-          if (parsed) {
+          const modelBook = parsed ? normalizeStrategy(parsed) : null;
+          // A reply that collapses a long-only + short-only pair into one side
+          // would delete half the user's strategy, so it is rejected and the
+          // full union is kept instead.
+          const parentDirs = new Set([...bookDirections(a), ...bookDirections(b)]);
+          const outDirs = new Set(modelBook ? bookDirections(modelBook) : []);
+          const lostSide = parentDirs.has('bull') && parentDirs.has('bear')
+            && !(outDirs.has('bull') && outDirs.has('bear'));
+          if (modelBook?.entryRules.length && !lostSide) {
             merged = normalizeStrategy({
               ...merged,
-              ...parsed,
+              ...modelBook,
               id: merged.id,
               parents: [a.id, b.id],
               origin: 'merged',
-              pair: resolvePair(parsed.pair, '', pairs.length ? pairs : engine.getSnapshot(), settings),
+              pair: resolvePair(modelBook.pair, '', pairs.length ? pairs : engine.getSnapshot(), settings),
             });
+          } else if (lostSide) {
+            note = ' — the model kept only one direction, so both parents\' rules were unioned instead';
           } else {
             note = ' — the model reply was unreadable, so the rules were unioned instead';
           }

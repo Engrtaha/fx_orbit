@@ -125,22 +125,40 @@ export const findStrategy = (list, id) => list.find((s) => s.id === id) ?? null;
 
 const shortTitle = (t) => t.replace(/\s+strategy$/i, '').trim() || t;
 
+const BULL_WORDS = /\b(?:bull(?:ish)?s?|longs?|buy(?:ing|s)?|green|upside)\b/i;
+const BEAR_WORDS = /\b(?:bear(?:ish)?s?|short(?:ing)?s?|sell(?:ing)?s?|red|downside)\b/i;
+
+// The directions a strategy's own rules trade (['bull'], ['bear'] or both).
+// A book with neither word set is treated as direction-neutral, not broken.
+export function bookDirections(s) {
+  const text = [...toList(s?.entryRules), ...toList(s?.riskRules)].join(' ');
+  const dirs = [];
+  if (BULL_WORDS.test(text)) dirs.push('bull');
+  if (BEAR_WORDS.test(text)) dirs.push('bear');
+  return dirs;
+}
+
 // Union merge used on its own when there is no model, and as the fallback when
-// the model's merge can't be parsed.
+// the model's merge can't be trusted. Every parent rule is kept: dropping one
+// would silently delete a setup the user wrote, which is exactly what a merge
+// must never do.
 export function mergeStrategies(a, b) {
   const samePair = a.pair === b.pair;
-  const union = (x, y, cap = 8) => [...new Set([...x, ...y])].slice(0, cap);
+  const union = (x, y) => [...new Set([...x, ...y])];
   // Either parent being timeframe-agnostic makes the merge agnostic too: its
   // setups were valid on every chart, so restricting the union would drop them.
   const tfUnion = a.timeframes?.length && b.timeframes?.length
     ? TIMEFRAMES.filter((t) => a.timeframes.includes(t) || b.timeframes.includes(t))
     : [];
+  const dirs = new Set([...bookDirections(a), ...bookDirections(b)]);
+  const twoSided = dirs.has('bull') && dirs.has('bear');
   return normalizeStrategy({
     title: `${shortTitle(a.title)} × ${shortTitle(b.title)} Merge`,
     pair: a.pair, // one book trades one pair; a disagreement is noted below
     analysis: [
-      `Combines “${a.title}” and “${b.title}”. Setups from either parent are valid;`
-      + ' where the two disagree the stricter rule is listed first and the looser one is dropped.',
+      `Combines “${a.title}” and “${b.title}”. Setups from either parent are valid — whichever one's`
+      + ' conditions are fulfilled first is the trade to take; where the two disagree the stricter rule is listed first and the looser one is dropped.',
+      twoSided ? 'The parents trade opposite directions, so the book keeps both a long setup and a short setup; the side whose conditions the live data satisfies is the side to take.' : '',
       a.analysis[0] ?? '',
       b.analysis[0] ?? '',
       samePair ? '' : `Parents target different pairs (${a.pair} and ${b.pair}); this merged book trades ${a.pair} only.`,
