@@ -6,7 +6,7 @@ import {
 import { engine, fmt } from '../data/marketEngine';
 import { loadSettings, saveSettings } from '../data/settings';
 import {
-  NEWS_CATEGORIES, NEWS_PROVIDERS, analyzeItem, closeNewsTrade, fetchNewsFeed, itemInUniverse,
+  NEWS_CATEGORIES, NEWS_PROVIDERS, analyzeItem, closeNewsTrade, deskAnalysis, fetchNewsFeed, itemInUniverse,
   itemTitle, newsTrades, placeNewsTrade, riskFlags, tradeLive, universeCurrencies,
 } from '../data/newsEngine';
 import { downscale, parseJsonLoose, aiReady, aiAuthHeaders, aiSupportsVision } from '../utils/ai';
@@ -201,9 +201,26 @@ export default function NewsPage() {
         });
         if (!res.ok) throw new Error(`AI API responded ${res.status}`);
         const data = await res.json();
-        const parsed = parseJsonLoose(data.choices?.[0]?.message?.content ?? '');
-        if (!parsed) throw new Error('Could not parse the model response.');
-        setShotResult({ ...parsed, simulated: false });
+        const text = String(data.choices?.[0]?.message?.content ?? '').trim();
+        const parsed = parseJsonLoose(text);
+        if (parsed) {
+          setShotResult({ ...parsed, simulated: false });
+        } else if (text) {
+          // Small vision models transcribe a screenshot faithfully but drop the
+          // JSON contract — tier their prose with the desk heuristic instead of
+          // throwing away a good read of the image.
+          const quoted = text.match(/["“]([^"”]{8,160})["”]/)?.[1];
+          const headline = (quoted ?? text.split(/(?<=[.!?])\s+/)[0]).slice(0, 160);
+          const read = deskAnalysis({ title: headline, summary: text });
+          setShotResult({
+            ...read,
+            headline,
+            affected: read.currencies,
+            riskNote: 'The model read the screenshot in prose, so the desk tiered that transcription.',
+          });
+        } else {
+          throw new Error('Could not parse the model response.');
+        }
       } else {
         await new Promise((r) => setTimeout(r, 1400));
         setShotResult(simulatedSnapshotRead(engine.getSnapshot()));

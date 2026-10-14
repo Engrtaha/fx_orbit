@@ -372,7 +372,7 @@ export default function SettingsPage() {
                 ? 'This model reads chart screenshots and uploaded images directly — the News screenshot flow '
                   + 'and Strategy uploads send it real pixels.'
                 : 'This model is text-only — screenshot and image uploads fall back to the simulated desk read. '
-                  + 'Pick MiniCPM-V 2.6 to enable them.'}
+                  + 'Pick Moondream to enable them.'}
             </span>
           </div>
         )}

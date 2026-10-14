@@ -170,3 +170,23 @@ describe('desk trade book', () => {
     expect(flags.map((f) => f.itemId)).toEqual(['x2']);
   });
 });
+
+describe('vision prose fallback', () => {
+  it('tiers a captioning model transcription into a desk read', () => {
+    // Moondream-class vision models read a screenshot faithfully but answer in
+    // prose, so the JSON contract is gone. NewsPage feeds the quoted headline
+    // and the transcription to the desk heuristic instead of discarding the
+    // read — this pins that deskAnalysis accepts that shape.
+    const text = 'The image shows a blue banner with white text that reads "US INFLATION SURPRISES HIGHER '
+      + 'CPI Rises 3.4% vs 3.1% expected - Fed rate path in focus". The text is in black against the banner.';
+    const quoted = text.match(/[""]([^""]{8,160})[""]/)?.[1];
+    expect(quoted).toContain('INFLATION');
+    const read = mod.deskAnalysis({ title: quoted, summary: text });
+    expect(read.impact).toBe('high');
+    expect(read.sentiment).toBe('bullish'); // "HIGHER" is the only tone hit in the title
+    expect(read.confidence).toBeGreaterThanOrEqual(40);
+    expect(read.confidence).toBeLessThanOrEqual(92);
+    expect(read.summary).toContain(quoted.slice(0, 20));
+    expect(read.simulated).toBe(true);
+  });
+});

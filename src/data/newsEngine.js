@@ -133,7 +133,7 @@ const BULLISH_RE = keyRes(BULLISH_KEYS);
 const BEARISH_RE = keyRes(BEARISH_KEYS);
 const countHits = (text, res) => res.reduce((n, re) => n + (re.test(text) ? 1 : 0), 0);
 
-function deskAnalysis(item) {
+export function deskAnalysis(item) {
   const title = itemTitle(item).toUpperCase();
   const blurb = itemBlurb(item).toUpperCase();
   const impact = item.impact ?? keywordImpact(`${title} ${blurb}`);

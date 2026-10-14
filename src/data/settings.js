@@ -166,9 +166,9 @@ export const AI_PROVIDERS = {
     label: 'Ollama (local)',
     base: 'http://localhost:11434/v1',
     // The light text model stays the default because it loads in seconds on an
-    // 8 GB machine; MiniCPM-V 2.6 sits beside it as the vision choice in
-    // `models` below. q2_K, not the 5.5 GB q4_K_M — the bigger build
-    // reproduces the swap storm the finance-8B model caused on this system.
+    // 8 GB machine; Moondream sits beside it as the vision choice in `models`
+    // below. 1.8B / 1.7 GB — small enough that loading it never recreates the
+    // RAM squeeze the finance-8B and MiniCPM-V builds caused on this system.
     model: 'llama3.2:latest',
     keyRequired: false,
     // The provider is text-first; only models carrying a projector take images.
@@ -176,7 +176,7 @@ export const AI_PROVIDERS = {
     vision: false,
     models: [
       { model: 'llama3.2:latest', label: 'Llama 3.2 · 3B', note: 'Fast, text only', vision: false },
-      { model: 'minicpm-v:8b-2.6-q2_K', label: 'MiniCPM-V 2.6 · 8B', note: 'Reads chart screenshots', vision: true },
+      { model: 'moondream:latest', label: 'Moondream · 1.8B', note: 'Reads chart screenshots', vision: true },
     ],
   },
 };

@@ -67,6 +67,7 @@ describe('ai provider helpers', () => {
   });
 
   it('opens the image path only for local models that carry a projector', () => {
+    expect(aiSupportsVision({ aiProvider: 'ollama', aiModel: 'moondream:latest' })).toBe(true);
     expect(aiSupportsVision({ aiProvider: 'ollama', aiModel: 'minicpm-v:8b-2.6-q2_K' })).toBe(true);
     expect(aiSupportsVision({ aiProvider: 'ollama', aiModel: 'qwen2.5vl:7b' })).toBe(true);
     expect(aiSupportsVision({ aiProvider: 'ollama', aiModel: 'gemma3:4b' })).toBe(true);
@@ -86,7 +87,7 @@ describe('ai provider helpers', () => {
 });
 
 describe('unloadOtherOllamaModels', () => {
-  const settings = { aiProvider: 'ollama', aiModel: 'minicpm-v:8b-2.6-q2_K', aiBaseUrl: 'http://localhost:11434/v1' };
+  const settings = { aiProvider: 'ollama', aiModel: 'moondream:latest', aiBaseUrl: 'http://localhost:11434/v1' };
   afterEach(() => vi.unstubAllGlobals());
 
   it('stops every loaded model except the selected one, on the native API', async () => {
@@ -94,7 +95,7 @@ describe('unloadOtherOllamaModels', () => {
     vi.stubGlobal('fetch', vi.fn(async (url, opts = {}) => {
       calls.push({ url: String(url), body: opts.body ? JSON.parse(opts.body) : null });
       if (String(url).endsWith('/api/ps')) {
-        return { ok: true, json: async () => ({ models: [{ name: 'llama3.2:latest' }, { name: 'minicpm-v:8b-2.6-q2_K' }] }) };
+        return { ok: true, json: async () => ({ models: [{ name: 'llama3.2:latest' }, { name: 'moondream:latest' }] }) };
       }
       return { ok: true, json: async () => ({ done: true }) };
     }));
