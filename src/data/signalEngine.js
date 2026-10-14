@@ -5,7 +5,8 @@
 
 import { engine, marketClosed, volatilityPips } from './marketEngine';
 import { loadSettings } from './settings';
-import { parseJsonLoose, aiReady, aiAuthHeaders } from '../utils/ai';
+import { parseJsonLoose, aiReady, aiAuthHeaders, aiServesDecisions } from '../utils/ai';
+import { fetchTmData, tmFindEntry, normalizeTmSignal } from './traderMagic';
 
 const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
 const num = (v) => { const n = Number(v); return Number.isFinite(n) ? n : null; };
@@ -124,6 +125,18 @@ export async function generateAiSignal(symbol, tf, strategy) {
     simulated: true,
   };
   if (!aiReady(settings)) return fallback;
+  // A bot backend publishes decisions rather than answering prompts, so read its
+  // row for this instrument instead of POSTing to a chat endpoint it never had.
+  if (aiServesDecisions(settings)) {
+    try {
+      const data = await fetchTmData(settings);
+      const entry = tmFindEntry(data, symbol, engine.getSnapshot().map((p) => p.symbol));
+      if (!entry) return { ...fallback, aiError: `TraderMagic publishes no row for ${symbol}.` };
+      return { ...normalizeTmSignal(entry, s, tf), simulated: false };
+    } catch (err) {
+      return { ...fallback, aiError: String(err?.message ?? err) };
+    }
+  }
   try {
     const payload = { instrument: signalContext(s, tf) };
     if (strategy) payload.strategy = strategy;

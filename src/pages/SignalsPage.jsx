@@ -244,7 +244,7 @@ export default function SignalsPage() {
             <span className="panel-title">Open Trade — {result.symbol}</span>
             <span className="panel-sub">
               {result.tf} · {result.mode === 'my' ? strategyName : 'AI Best Strategy'}
-              {result.simulated ? ' · engine fallback' : ` · ${settings.aiModel || 'AI model'}`}
+              {result.simulated ? ' · engine fallback' : ` · ${result.source || settings.aiModel || 'AI model'}`}
             </span>
           </div>
           <div className="ot-body">
@@ -282,7 +282,7 @@ export default function SignalsPage() {
             <p className="sig-note">No trade — the model sees no clean setup right now. Regenerate later or pick another pair.</p>
           )}
           {result.summary && <p className="sig-note">{result.summary}</p>}
-          {result.aiError && <p className="sig-note warn">AI model error — showing engine fallback. {result.aiError}</p>}
+          {result.aiError && <p className="sig-note warn">AI backend error — showing engine fallback. {result.aiError}</p>}
         </section>
       )}
     </div>

@@ -6,7 +6,8 @@ import {
 import { engine } from '../data/marketEngine';
 import { UNIVERSE, GROUPS, AI_PROVIDERS, loadSettings, saveSettings, resetSettings } from '../data/settings';
 import { testTvConnection, subscribeTvStatus, getTvStatus } from '../data/tvClient';
-import { aiProviderOf, aiAuthHeaders, aiSupportsVision, unloadOtherOllamaModels } from '../utils/ai';
+import { aiProviderOf, aiAuthHeaders, aiSupportsVision, aiSupportsChat, unloadOtherOllamaModels } from '../utils/ai';
+import { fetchTmData, tmEntries } from '../data/traderMagic';
 
 export default function SettingsPage() {
   const [settings, setSettings] = useState(() => loadSettings());
@@ -151,6 +152,24 @@ export default function SettingsPage() {
     setAiTest(null);
     const t0 = performance.now();
     try {
+      // A bot backend has no chat endpoint, so "connection" means its decision
+      // feed answering — asking it a prompt would only ever produce a 404.
+      if (!aiSupportsChat(settings)) {
+        const rows = tmEntries(await fetchTmData(settings)).filter((e) => e.signal != null);
+        const ms = Math.round(performance.now() - t0);
+        setAiTest(rows.length
+          ? {
+            ok: true,
+            msg: `TraderMagic answered in ${ms} ms — ${rows.length} decision${rows.length === 1 ? '' : 's'} `
+              + `(${rows.slice(0, 3).map((r) => `${r.symbol}: ${r.signal}`).join(', ')})`,
+          }
+          : {
+            ok: false,
+            msg: `TraderMagic answered in ${ms} ms but published no decisions — is its `
+              + 'data_retrieval loop running and TAAPI_API_KEY set?',
+          });
+        return;
+      }
       const res = await fetch(`${settings.aiBaseUrl.replace(/\/$/, '')}/chat/completions`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...aiAuthHeaders(settings) },
@@ -313,8 +332,10 @@ export default function SettingsPage() {
           <span className="panel-sub">{prov.label}</span>
         </div>
         <p className="section-desc">
-          Call a cloud OpenAI-compatible endpoint with your own API key, or run a local model through
-          Ollama — free and private, no key needed.
+          Call a cloud OpenAI-compatible endpoint with your own API key, run a local model through
+          Ollama — free and private, no key needed — or read decisions from a local
+          <a href="https://github.com/rawveg/trader-magic" target="_blank" rel="noreferrer"> TraderMagic </a>
+          bot, which publishes its own RSI calls instead of answering prompts.
         </p>
         <div className="pills ai-provider-pills">
           {Object.entries(AI_PROVIDERS).map(([id, p]) => (
@@ -323,25 +344,27 @@ export default function SettingsPage() {
             </button>
           ))}
         </div>
-        <div className="field">
-          <label>Model</label>
-          <input
-            className="inp"
-            list="ai-model-options"
-            placeholder={prov.model}
-            value={settings.aiModel}
-            onChange={setField('aiModel')}
-          />
-          <datalist id="ai-model-options">
-            {provider === 'ollama' && ollamaModels.map((m) => <option key={m} value={m} />)}
-          </datalist>
-          <span className="field-hint">
-            {provider === 'ollama'
-              ? 'Use any model you\'ve pulled with ollama. Default: '
-                + `${AI_PROVIDERS.ollama.model} — hit "Fetch installed models" to list what is on this machine.`
-              : 'Any OpenAI-compatible chat model id, e.g. gpt-4o-mini, deepseek-chat.'}
-          </span>
-        </div>
+        {prov.chat !== false && (
+          <div className="field">
+            <label>Model</label>
+            <input
+              className="inp"
+              list="ai-model-options"
+              placeholder={prov.model}
+              value={settings.aiModel}
+              onChange={setField('aiModel')}
+            />
+            <datalist id="ai-model-options">
+              {provider === 'ollama' && ollamaModels.map((m) => <option key={m} value={m} />)}
+            </datalist>
+            <span className="field-hint">
+              {provider === 'ollama'
+                ? 'Use any model you\'ve pulled with ollama. Default: '
+                  + `${AI_PROVIDERS.ollama.model} — hit "Fetch installed models" to list what is on this machine.`
+                : 'Any OpenAI-compatible chat model id, e.g. gpt-4o-mini, deepseek-chat.'}
+            </span>
+          </div>
+        )}
 
         {provider === 'ollama' && prov.models?.length > 0 && (
           <div className="field">
@@ -394,12 +417,13 @@ export default function SettingsPage() {
           </div>
         ) : (
           <span className="field-hint ok">
-            Runs locally via Ollama — no API key, requests never leave this machine.
-            Start the server with <code>ollama serve</code>.
+            {provider === 'ollama'
+              ? <>Runs locally via Ollama — no API key, requests never leave this machine. Start the server with <code>ollama serve</code>.</>
+              : <>Runs as a local service — the terminal only reads its JSON endpoint, no key is stored here. Start it with <code>docker compose up</code> in the TraderMagic checkout.</>}
           </span>
         )}
         <div className="field">
-          <label>Base URL (OpenAI-compatible)</label>
+          <label>{prov.chat === false ? 'Bot dashboard URL' : 'Base URL (OpenAI-compatible)'}</label>
           <input className="inp" placeholder={prov.base} value={settings.aiBaseUrl} onChange={setField('aiBaseUrl')} />
         </div>
         <div className="btn-row">
@@ -420,7 +444,9 @@ export default function SettingsPage() {
             ? (settings.aiApiKey
               ? 'News desk, strategies and screenshot analysis will call your model for real analysis. Keys stay in this browser only.'
               : 'Leave empty to keep the built-in simulated analysis engines.')
-            : 'News desk and strategy analysis will call your local model — no key needed.'}
+            : prov.chat === false
+              ? "Signals read the bot's published decisions. The news desk, strategy analysis and screenshots ask a model questions, so they stay on their built-in engines while this is selected."
+              : 'News desk and strategy analysis will call your local model — no key needed.'}
         </span>
       </section>
 
