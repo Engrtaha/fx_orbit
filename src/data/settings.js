@@ -183,18 +183,4 @@ export const AI_PROVIDERS = {
       { model: 'qwen3-vl:2b-instruct', label: 'Qwen3-VL · 2B', note: 'Chart reasoning, reads screenshots', vision: true },
     ],
   },
-  // rawveg/trader-magic: a local Python bot whose own loop asks Ollama for a
-  // buy/sell/hold call on TAAPI.io RSI data and publishes the result over HTTP.
-  // It answers GET /api/data and has no /chat/completions endpoint, so it can
-  // supply decisions but can never be asked a question — `chat: false` is what
-  // keeps the news desk, strategy analysis and screenshots off it.
-  tradermagic: {
-    label: 'TraderMagic (local bot)',
-    base: 'http://localhost:9753',
-    model: '',
-    keyRequired: false,
-    vision: false,
-    chat: false,
-    decisions: true,
-  },
 };

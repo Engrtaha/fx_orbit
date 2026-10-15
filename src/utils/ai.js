@@ -28,14 +28,6 @@ export function aiSupportsVision(s = {}) {
   return modelSupportsVision(s.aiModel);
 }
 
-// A bot backend publishes decisions instead of answering prompts, so every
-// prompt-driven surface has to check this before it tries to ask it something —
-// otherwise the call just 404s and the page shows a network error where a
-// deterministic fallback was available.
-export const aiSupportsChat = (s = {}) => AI_PROVIDERS[aiProviderOf(s)].chat !== false;
-
-export const aiServesDecisions = (s = {}) => AI_PROVIDERS[aiProviderOf(s)].decisions === true;
-
 // Ollama keeps every model it recently served resident for its keep-alive
 // window, so switching models would leave the old one eating RAM next to the
 // new one — two models at once on an 8 GB machine. This asks the daemon to

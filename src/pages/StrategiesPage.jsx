@@ -11,7 +11,7 @@ import {
 } from '../data/strategyBook';
 import PriceChart from '../components/PriceChart';
 import {
-  downscale, parseJsonLoose, aiReady, aiChat, aiSupportsVision, aiSupportsChat, attachmentContent,
+  downscale, parseJsonLoose, aiReady, aiChat, aiSupportsVision, attachmentContent,
   fileKind, readFile, clipText, videoFrames,
 } from '../utils/ai';
 
@@ -243,9 +243,7 @@ export default function StrategiesPage() {
   const [autoSet, setAutoSet] = useState(() => new Set(loadSettings().autoTrade));
   const fileRef = useRef(null);
   const aiS = loadSettings();
-  // A bot backend publishes decisions and answers no prompts, so every path
-  // here falls back to its deterministic route instead of calling it.
-  const hasKey = aiReady(aiS) && aiSupportsChat(aiS);
+  const hasKey = aiReady(aiS);
   const visionOk = aiSupportsVision(aiS);
 
   useEffect(() => engine.subscribe((list) => setPairs(list)), []);
@@ -355,7 +353,7 @@ export default function StrategiesPage() {
       const settings = loadSettings();
       let merged = mergeStrategies(a, b);
       let note = '';
-      if (aiReady(settings) && aiSupportsChat(settings)) {
+      if (aiReady(settings)) {
         // The model writes the merged book; the deterministic union is the floor
         // under it, so a dead or unparsable reply still merges the two.
         try {
@@ -429,7 +427,7 @@ export default function StrategiesPage() {
     setError(null);
     const settings = loadSettings();
     try {
-      if (aiReady(settings) && aiSupportsChat(settings)) {
+      if (aiReady(settings)) {
         // Text-only local models reject image parts, so pixels are dropped for them.
         const content = attachmentContent(
           `Analyze this trading strategy:\n\n${desc}`,

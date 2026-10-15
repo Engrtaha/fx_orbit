@@ -5,7 +5,7 @@
 
 import { engine, volatilityPips } from './marketEngine';
 import { UNIVERSE, loadSettings } from './settings';
-import { parseJsonLoose, aiReady, aiAuthHeaders, aiSupportsChat } from '../utils/ai';
+import { parseJsonLoose, aiReady, aiAuthHeaders } from '../utils/ai';
 
 export const NEWS_PROVIDERS = [
   { id: 'rss', label: 'RSS — FXStreet / ForexLive / Investing.com', hint: 'no key needed · headlines land within minutes' },
@@ -291,7 +291,7 @@ function normalizeAnalysis(raw, item) {
 
 export async function analyzeItem(item) {
   const settings = loadSettings();
-  if (aiReady(settings) && aiSupportsChat(settings)) {
+  if (aiReady(settings)) {
     try {
       const raw = await callAnalyst(settings, item, marketContext());
       return { ...normalizeAnalysis(raw, item), simulated: false };
