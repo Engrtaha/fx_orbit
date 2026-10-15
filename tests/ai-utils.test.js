@@ -68,6 +68,7 @@ describe('ai provider helpers', () => {
 
   it('opens the image path only for local models that carry a projector', () => {
     expect(aiSupportsVision({ aiProvider: 'ollama', aiModel: 'moondream:latest' })).toBe(true);
+    expect(aiSupportsVision({ aiProvider: 'ollama', aiModel: 'qwen3-vl:2b-instruct' })).toBe(true);
     expect(aiSupportsVision({ aiProvider: 'ollama', aiModel: 'minicpm-v:8b-2.6-q2_K' })).toBe(true);
     expect(aiSupportsVision({ aiProvider: 'ollama', aiModel: 'qwen2.5vl:7b' })).toBe(true);
     expect(aiSupportsVision({ aiProvider: 'ollama', aiModel: 'gemma3:4b' })).toBe(true);

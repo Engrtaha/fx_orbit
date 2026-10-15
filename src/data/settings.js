@@ -166,9 +166,12 @@ export const AI_PROVIDERS = {
     label: 'Ollama (local)',
     base: 'http://localhost:11434/v1',
     // The light text model stays the default because it loads in seconds on an
-    // 8 GB machine; Moondream sits beside it as the vision choice in `models`
-    // below. 1.8B / 1.7 GB — small enough that loading it never recreates the
-    // RAM squeeze the finance-8B and MiniCPM-V builds caused on this system.
+    // 8 GB machine; the two vision presets sit beside it in `models` below.
+    // Qwen3-VL is ChartVerse-2B's own base architecture — ChartVerse ships
+    // safetensors only and Ollama refuses it as "not GGUF". The `-instruct` tag
+    // is deliberate: the plain `qwen3-vl:2b` is a thinking model that spends the
+    // whole 4096-token window on reasoning and returns an empty `content`, and
+    // neither `thinking:false` nor `/nothink` stops it (verified on this box).
     model: 'llama3.2:latest',
     keyRequired: false,
     // The provider is text-first; only models carrying a projector take images.
@@ -177,6 +180,7 @@ export const AI_PROVIDERS = {
     models: [
       { model: 'llama3.2:latest', label: 'Llama 3.2 · 3B', note: 'Fast, text only', vision: false },
       { model: 'moondream:latest', label: 'Moondream · 1.8B', note: 'Reads chart screenshots', vision: true },
+      { model: 'qwen3-vl:2b-instruct', label: 'Qwen3-VL · 2B', note: 'Chart reasoning, reads screenshots', vision: true },
     ],
   },
   // rawveg/trader-magic: a local Python bot whose own loop asks Ollama for a

@@ -395,7 +395,7 @@ export default function SettingsPage() {
                 ? 'This model reads chart screenshots and uploaded images directly — the News screenshot flow '
                   + 'and Strategy uploads send it real pixels.'
                 : 'This model is text-only — screenshot and image uploads fall back to the simulated desk read. '
-                  + 'Pick Moondream to enable them.'}
+                  + 'Pick Moondream or Qwen3-VL to enable them.'}
             </span>
           </div>
         )}
