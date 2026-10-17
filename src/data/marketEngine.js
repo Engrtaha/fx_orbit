@@ -35,6 +35,9 @@ const CCY_COLORS = {
   JPY: ['#f43f5e', '#fb7185'], CHF: ['#ef4444', '#f59e0b'], AUD: ['#f59e0b', '#f97316'],
   NZD: ['#eab308', '#ca8a04'], CAD: ['#dc2626', '#f97316'], XAU: ['#fbbf24', '#d97706'],
   XAG: ['#94a3b8', '#64748b'],
+  BTC: ['#f7931a', '#d97706'], ETH: ['#8b9df0', '#6366f1'], SOL: ['#14f195', '#0ea5e9'],
+  BNB: ['#f0b90b', '#b45309'], XRP: ['#60a5fa', '#64748b'], DOGE: ['#c2a633', '#926e2a'],
+  ADA: ['#3468d1', '#6366f1'],
 };
 export const ccyGradient = (code) => CCY_COLORS[code] ?? ['#64748b', '#475569'];
 
@@ -52,7 +55,9 @@ export const sessionOpen = (s, hourUtc) => {
 
 // FX and the index CFDs trade 24/5: the tape stops when New York closes on
 // Friday (22:00 UTC) and prints again when Sydney opens on Sunday. Whatever the
-// feed shows in between is Friday's last print, not a live price.
+// feed shows in between is Friday's last print, not a live price. Crypto is the
+// exception — `alwaysOpen` instruments keep trading straight through the
+// weekend, so the close is decided per symbol, never for the book as a whole.
 const WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 
 export const reopenLabel = (d) => (d
@@ -67,6 +72,14 @@ export function marketClosed(now = new Date()) {
   const reopensAt = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 22));
   reopensAt.setUTCDate(reopensAt.getUTCDate() + (day === 5 ? 2 : day === 6 ? 1 : 0));
   return { closed: true, reopensAt };
+}
+
+// The weekend window only binds instruments that actually shut. Crypto pairs
+// carry `alwaysOpen` in the universe catalog and stay live Saturday to Sunday.
+export function symbolMarketClosed(symbol, now = new Date()) {
+  const def = UNIVERSE.find((d) => d.symbol === symbol);
+  if (def?.alwaysOpen) return { closed: false, reopensAt: null };
+  return marketClosed(now);
 }
 
 export const fmt = (v, d) =>
@@ -231,13 +244,12 @@ class MarketEngine {
   tick() {
     this.tickCount += 1;
     const roll = this.tickCount % 8 === 0;
-    const open = this.bookOpen();
     for (const s of this.states.values()) {
       if (s.tv) {
         // Price is driven by the TradingView feed; tick() only runs the
         // trade/strategy bookkeeping on top of the realtime candles.
         this.refreshIndicators(s);
-        if (open) {
+        if (this.bookOpenFor(s)) {
           this.checkTradeExits(s);
           this.maybeAutoTrade(s);
           if (roll) this.checkStrategies(s);
@@ -275,7 +287,7 @@ class MarketEngine {
       this.refreshIndicators(s);
       this.derive(s);
 
-      if (open) {
+      if (this.bookOpenFor(s)) {
         this.checkTradeExits(s);
         this.maybeAutoTrade(s);
         if (roll) this.checkStrategies(s);
@@ -286,8 +298,9 @@ class MarketEngine {
 
   // While the tape is shut no position may be opened, closed or time-stopped:
   // the last print is stale, so acting on it books phantom P&L into history.
-  bookOpen() {
-    return !marketClosed().closed;
+  // Crypto instruments never shut, so the check is per symbol.
+  bookOpenFor(s) {
+    return s.alwaysOpen ? true : !marketClosed().closed;
   }
 
   // ── TradingView realtime ingest ─────────────────────────────────────────────
@@ -406,7 +419,7 @@ class MarketEngine {
     if (s.spark.length > 90) s.spark.shift();
     this.refreshIndicators(s);
     this.derive(s);
-    if (this.bookOpen()) {
+    if (this.bookOpenFor(s)) {
       this.checkTradeExits(s);
       this.maybeAutoTrade(s);
     }
@@ -438,7 +451,7 @@ class MarketEngine {
     if (tick.change != null) s.change = tick.change;
     if (tick.changePct != null) s.changePct = tick.changePct;
     s.tv = true;
-    if (this.bookOpen()) this.checkTradeExits(s);
+    if (this.bookOpenFor(s)) this.checkTradeExits(s);
     this.scheduleEmit();
   }
 

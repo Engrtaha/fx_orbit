@@ -14,7 +14,8 @@ export const NEWS_PROVIDERS = [
 ];
 export const NEWS_CATEGORIES = ['forex', 'economy', 'general', 'crypto'];
 export const NEWS_SOURCE = 'News AI';
-const CCY_CODES = ['USD', 'EUR', 'GBP', 'JPY', 'CHF', 'AUD', 'NZD', 'CAD', 'XAU', 'XAG'];
+const CCY_CODES = ['USD', 'EUR', 'GBP', 'JPY', 'CHF', 'AUD', 'NZD', 'CAD', 'XAU', 'XAG',
+  'BTC', 'ETH', 'SOL', 'XRP', 'DOGE', 'ADA', 'BNB'];
 
 const bridgeUrl = () => (loadSettings().tvBackendUrl || 'http://localhost:5178').replace(/\/+$/, '');
 const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
@@ -25,14 +26,15 @@ export const itemBlurb = (item) => item.summary || itemTitle(item);
 
 // ── Universe scope ───────────────────────────────────────────────────────────
 // Currency codes the enabled instruments are exposed to, so the desk can show
-// only the news that actually moves the pairs the user trades.
+// only the news that actually moves the pairs the user trades. Crypto tickers
+// are 3-4 letters (DOGE), so the code test accepts both.
 export function universeCurrencies(pairs) {
   const list = pairs ?? loadSettings().pairs;
   const out = new Set();
   for (const sym of list) {
     const def = UNIVERSE.find((d) => d.symbol === sym);
     if (!def) continue;
-    for (const c of [def.base, def.quote]) if (/^[A-Z]{3}$/.test(c)) out.add(c);
+    for (const c of [def.base, def.quote]) if (/^[A-Z]{3,4}$/.test(c)) out.add(c);
   }
   return out;
 }
@@ -76,7 +78,7 @@ function currenciesOf(item) {
 // carry XAU/XAG, so matching must read base/quote, not the symbol string.
 const symbolCcys = (s) => [s.base, s.quote]
   .map((c) => String(c ?? '').toUpperCase())
-  .filter((c) => /^[A-Z]{3}$/.test(c));
+  .filter((c) => /^[A-Z]{3,4}$/.test(c));
 
 function symbolFor(item) {
   const snapshot = engine.getSnapshot();

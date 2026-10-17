@@ -2,7 +2,9 @@ import { useEffect, useMemo, useState } from 'react';
 import {
   Zap, ChevronDown, ArrowDownRight, ArrowUpRight, Loader2, Minus, Radio, History, Moon, Clock,
 } from 'lucide-react';
-import { engine, fmt, marketClosed, reopenLabel, TIMEFRAMES } from '../data/marketEngine';
+import {
+  engine, fmt, marketClosed, symbolMarketClosed, reopenLabel, TIMEFRAMES,
+} from '../data/marketEngine';
 import { loadSettings } from '../data/settings';
 import { allowedTimeframes, bookDirections, timeframeLabel } from '../data/strategyBook';
 import {
@@ -39,9 +41,6 @@ export default function SignalsPage() {
 
   const liveSigs = activeSignals();
   const outcomes = recentOutcomes(6);
-  // The engine ticks every second, so this re-evaluates across the close/open
-  // boundary without any extra timer.
-  const closed = marketClosed();
 
   const strategyName = settings.activeStrategy || 'AI Best';
   const subtitleStrategy = mode === 'my' ? strategyName : 'AI Best Strategy';
@@ -57,6 +56,11 @@ export default function SignalsPage() {
   const pair = pairs.some((p) => p.symbol === pairSel)
     ? pairSel
     : (pairs.some((p) => p.symbol === settings.defaultPair) ? settings.defaultPair : pairs[0]?.symbol ?? pairSel);
+
+  // The engine ticks every second, so this re-evaluates across the close/open
+  // boundary without any extra timer. The close binds the selected pair only —
+  // crypto pairs generate right through the weekend.
+  const closed = symbolMarketClosed(pair);
 
   const state = useMemo(() => pairs.find((p) => p.symbol === pair), [pairs, pair]);
 
@@ -171,10 +175,8 @@ export default function SignalsPage() {
         <div className="panel-head">
           <span className="panel-title"><Radio size={14} /> Active signals</span>
           <span className="panel-sub">
-            {liveSigs.length} live ·{' '}
-            {closed.closed
-              ? 'frozen while the market is closed — nothing is scored or regenerated until it reopens'
-              : 'held to TP/SL, then regenerated'}
+            {liveSigs.length} live · held to TP/SL, then regenerated
+            {marketClosed().closed ? ' — FX signals rest over the weekend, crypto signals keep running' : ''}
           </span>
         </div>
         {liveSigs.length === 0 && (

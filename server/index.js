@@ -30,8 +30,15 @@ const TV_INDICES = {
   JP225: 'FPMARKETS:JP225', HK50: 'CAPITALCOM:HK50',
 };
 const TV_STOCKS = new Set(['AAPL', 'NVDA', 'TSLA', 'MSFT', 'AMZN', 'META']);
+// Crypto trades against USD on Coinbase; TV's flagship BINANCE pairs quote USDT.
+const TV_CRYPTO = {
+  'BTC/USD': 'COINBASE:BTCUSD', 'ETH/USD': 'COINBASE:ETHUSD', 'SOL/USD': 'COINBASE:SOLUSD',
+  'BNB/USD': 'COINBASE:BNBUSD', 'XRP/USD': 'COINBASE:XRPUSD', 'DOGE/USD': 'COINBASE:DOGEUSD',
+  'ADA/USD': 'COINBASE:ADAUSD',
+};
 
 export function toTvSymbol(sym) {
+  if (TV_CRYPTO[sym]) return TV_CRYPTO[sym];
   if (TV_INDICES[sym]) return TV_INDICES[sym];
   if (TV_STOCKS.has(sym)) return `NASDAQ:${sym}`;
   return `FX:${sym.replace('/', '')}`;

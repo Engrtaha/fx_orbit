@@ -3,7 +3,7 @@ import { seedStorage } from './setup.js';
 
 seedStorage({ pairs: ['US100', 'XAU/USD'], defaultPair: 'XAU/USD' });
 const {
-  engine, marketClosed, volatilityPips, TIMEFRAMES, barCloseIn, tfPeriodMs,
+  engine, marketClosed, symbolMarketClosed, volatilityPips, TIMEFRAMES, barCloseIn, tfPeriodMs,
 } = await import('../src/data/marketEngine.js');
 const { UNIVERSE } = await import('../src/data/settings.js');
 
@@ -205,12 +205,48 @@ describe('weekend market hours', () => {
     vi.useFakeTimers();
     try {
       vi.setSystemTime(new Date('2026-10-10T16:00:00Z'));
-      expect(engine.bookOpen()).toBe(false);
+      expect(engine.bookOpenFor(engine.getState('XAU/USD'))).toBe(false);
       vi.setSystemTime(new Date('2026-10-12T16:00:00Z'));
-      expect(engine.bookOpen()).toBe(true);
+      expect(engine.bookOpenFor(engine.getState('XAU/USD'))).toBe(true);
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe('crypto universe (24/7)', () => {
+  it('lists crypto pairs in their own group with the alwaysOpen flag', () => {
+    const crypto = UNIVERSE.filter((d) => d.group === 'Crypto');
+    expect(crypto.length).toBeGreaterThanOrEqual(7);
+    expect(crypto.map((d) => d.symbol)).toEqual(
+      expect.arrayContaining(['BTC/USD', 'ETH/USD', 'SOL/USD', 'BNB/USD', 'XRP/USD', 'DOGE/USD', 'ADA/USD']),
+    );
+    expect(crypto.every((d) => d.alwaysOpen && d.pip > 0 && d.decimals > 0)).toBe(true);
+  });
+
+  it('keeps crypto open through the weekend while FX and indices stay shut', () => {
+    const sat = new Date('2026-10-10T16:00:00Z');
+    expect(symbolMarketClosed('BTC/USD', sat).closed).toBe(false);
+    expect(symbolMarketClosed('ETH/USD', sat).closed).toBe(false);
+    expect(symbolMarketClosed('EUR/USD', sat).closed).toBe(true);
+    expect(symbolMarketClosed('US100', sat).closed).toBe(true);
+  });
+
+  it('opens and manages a crypto trade on a Saturday', () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date('2026-10-10T16:00:00Z'));
+      engine.applyUniverse(['BTC/USD']);
+      engine.setTvLive('BTC/USD', true);
+      const s = engine.getState('BTC/USD');
+      expect(engine.bookOpenFor(s)).toBe(true);
+      const t = engine.openTrade({ symbol: 'BTC/USD', side: 'BUY', slPips: 150, tpPips: 400 });
+      expect(t).not.toBeNull();
+      engine.closeTrade(t, s.mid, 'cleanup');
+    } finally {
+      vi.useRealTimers();
+    }
+    engine.applyUniverse(['US100', 'XAU/USD']);
   });
 });
 

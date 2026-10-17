@@ -23,15 +23,21 @@ export default function TopBar({ pairs, selected, eyebrow = 'FxOrbit Terminal', 
   // actually came from, otherwise a dead bridge looks like a live terminal.
   const live = pairs.some((p) => p.tv);
   const closed = marketClosed();
-  const feedHint = closed.closed
+  // Crypto never shuts, so the weekend close only closes the terminal when no
+  // always-open instrument is enabled.
+  const anyAlwaysOpen = pairs.some((p) => p.alwaysOpen);
+  const shut = closed.closed && !anyAlwaysOpen;
+  const feedHint = shut
     ? `Market is closed for the weekend — the tape holds Friday's last print. It reopens ${reopenLabel(closed.reopensAt)}.`
-    : live
-      ? `TradingView bridge is streaming quotes on ${tv.url}`
-      : tv.state === 'connecting' || tv.state === 'open'
-        ? `Bridge reachable at ${tv.url} — waiting for the first candles`
-        : tv.state === 'idle'
-          ? 'Live feed is off — turn on TradingView in Settings to stream real quotes'
-          : `Bridge unreachable at ${tv.url || 'the configured URL'} — prices are simulated. Run npm run dev, or fix the backend URL in Settings.`;
+    : closed.closed
+      ? `Weekend — FX and index desks hold Friday's last print until ${reopenLabel(closed.reopensAt)}; crypto pairs stream 24/7.`
+      : live
+        ? `TradingView bridge is streaming quotes on ${tv.url}`
+        : tv.state === 'connecting' || tv.state === 'open'
+          ? `Bridge reachable at ${tv.url} — waiting for the first candles`
+          : tv.state === 'idle'
+            ? 'Live feed is off — turn on TradingView in Settings to stream real quotes'
+            : `Bridge unreachable at ${tv.url || 'the configured URL'} — prices are simulated. Run npm run dev, or fix the backend URL in Settings.`;
 
   const results = useMemo(() => {
     const q = query.trim().toUpperCase();
@@ -89,8 +95,10 @@ export default function TopBar({ pairs, selected, eyebrow = 'FxOrbit Terminal', 
         <div className="session-chip">
           <Globe size={13} />
           <span>
-            {closed.closed ? (
+            {shut ? (
               <>Market closed · <b>reopens {reopenLabel(closed.reopensAt)}</b></>
+            ) : closed.closed ? (
+              <>Weekend — FX reopens <b>{reopenLabel(closed.reopensAt)}</b> · crypto live</>
             ) : openSessions.length > 0 ? (
               <><b>{openSessions.join(' · ')}</b> session{openSessions.length > 1 ? 's' : ''} live</>
             ) : (
@@ -104,9 +112,9 @@ export default function TopBar({ pairs, selected, eyebrow = 'FxOrbit Terminal', 
           <span className="s">UTC Time</span>
         </div>
 
-        <div className={`live-badge${closed.closed ? ' closed' : live ? '' : ' sim'}`} title={feedHint}>
-          {closed.closed ? <Moon size={12} /> : <span className="live-dot" />}
-          {closed.closed ? 'CLOSED' : live ? 'LIVE' : 'SIM'}
+        <div className={`live-badge${shut ? ' closed' : live ? '' : ' sim'}`} title={feedHint}>
+          {shut ? <Moon size={12} /> : <span className="live-dot" />}
+          {shut ? 'CLOSED' : live ? 'LIVE' : 'SIM'}
         </div>
 
         {selected && (

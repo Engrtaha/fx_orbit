@@ -3,7 +3,7 @@
 // provider configured the model reads the real stats; otherwise the terminal's
 // own engine math produces the same shape, so the page stays usable offline.
 
-import { engine, marketClosed, volatilityPips } from './marketEngine';
+import { engine, symbolMarketClosed, volatilityPips } from './marketEngine';
 import { loadSettings } from './settings';
 import { parseJsonLoose, aiReady, aiAuthHeaders } from '../utils/ai';
 
@@ -231,12 +231,14 @@ async function closeSignal(sig, outcome, price) {
 // Re-entry guarded: regeneration may call the model for seconds, and ticks
 // arrive on a 1s interval — overlapping runs would spam the provider.
 export async function tickSignals() {
-  // Held signals stay exactly as they were until the tape prints again: there
-  // is no live price to score a TP/SL hit against while the market is shut.
-  if (ticking || marketClosed().closed) return;
+  if (ticking) return;
   ticking = true;
   try {
     for (const sig of [...state().active]) {
+      // A held FX signal stays exactly as it was while the tape is shut — there
+      // is no live price to score a TP/SL hit against. Crypto signals tick on,
+      // their market never closes.
+      if (symbolMarketClosed(sig.symbol).closed) continue;
       const s = engine.getState(sig.symbol);
       if (!s) continue;
       const hitSl = sig.side === 'LONG' ? s.mid <= sig.sl : s.mid >= sig.sl;

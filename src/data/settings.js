@@ -58,11 +58,23 @@ export const UNIVERSE = [
   { symbol: 'MSFT',  base: 'MSFT',  quote: 'USD', price: 521.44, decimals: 2, vol: 0.0013, spread: 8,  pip: 0.01, group: 'Stock' },
   { symbol: 'AMZN',  base: 'AMZN',  quote: 'USD', price: 232.68, decimals: 2, vol: 0.0018, spread: 7,  pip: 0.01, group: 'Stock' },
   { symbol: 'META',  base: 'META',  quote: 'USD', price: 719.84, decimals: 2, vol: 0.0019, spread: 10, pip: 0.01, group: 'Stock' },
+  // Crypto — quoted against USD and traded through the same engine, but the
+  // tape never shuts: `alwaysOpen` exempts them from the weekend close. Seeds
+  // sit near real Coinbase levels; pip/spread are tuned so a volatility stop
+  // is never inside the spread on the cheap coins.
+  { symbol: 'BTC/USD',  base: 'BTC',  quote: 'USD', price: 81470,  decimals: 1, vol: 0.0011, spread: 28, pip: 1,      group: 'Crypto', alwaysOpen: true },
+  { symbol: 'ETH/USD',  base: 'ETH',  quote: 'USD', price: 2432.2, decimals: 2, vol: 0.0013, spread: 45, pip: 0.1,    group: 'Crypto', alwaysOpen: true },
+  { symbol: 'SOL/USD',  base: 'SOL',  quote: 'USD', price: 104.53, decimals: 2, vol: 0.0016, spread: 15, pip: 0.01,   group: 'Crypto', alwaysOpen: true },
+  { symbol: 'BNB/USD',  base: 'BNB',  quote: 'USD', price: 720.0,  decimals: 2, vol: 0.0012, spread: 20, pip: 0.05,   group: 'Crypto', alwaysOpen: true },
+  { symbol: 'XRP/USD',  base: 'XRP',  quote: 'USD', price: 1.3061, decimals: 4, vol: 0.0018, spread: 30, pip: 0.0001, group: 'Crypto', alwaysOpen: true },
+  { symbol: 'DOGE/USD', base: 'DOGE', quote: 'USD', price: 0.0803, decimals: 5, vol: 0.0022, spread: 20, pip: 0.00001, group: 'Crypto', alwaysOpen: true },
+  { symbol: 'ADA/USD',  base: 'ADA',  quote: 'USD', price: 0.2229, decimals: 4, vol: 0.0018, spread: 12, pip: 0.00005, group: 'Crypto', alwaysOpen: true },
 ];
 
 export const DEFAULT_ENABLED = [
   'EUR/USD', 'GBP/USD', 'USD/JPY', 'USD/CHF', 'AUD/USD', 'USD/CAD',
   'NZD/USD', 'EUR/GBP', 'XAU/USD', 'XAG/USD', 'US100', 'US500', 'US30',
+  'BTC/USD', 'ETH/USD', 'SOL/USD',
 ];
 
 const SETTINGS_KEY = 'fxorbit-settings';
@@ -150,7 +162,7 @@ export function saveStrategies(list) {
   localStorage.setItem(STRATEGIES_KEY, JSON.stringify(list));
 }
 
-export const GROUPS = ['Major', 'Cross', 'Exotic', 'Metal', 'Index', 'Stock'];
+export const GROUPS = ['Major', 'Cross', 'Exotic', 'Metal', 'Index', 'Stock', 'Crypto'];
 
 // AI backends. Both speak the OpenAI /chat/completions shape; Ollama serves it
 // at /v1 on the local machine and needs no key.

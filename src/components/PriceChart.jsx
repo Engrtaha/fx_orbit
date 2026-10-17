@@ -4,7 +4,7 @@ import {
 } from 'lightweight-charts';
 import { Activity, Timer } from 'lucide-react';
 import {
-  TIMEFRAMES, barCloseIn, engine, fmt, marketClosed, tfPeriodMs, volatilityPips,
+  TIMEFRAMES, barCloseIn, engine, fmt, symbolMarketClosed, tfPeriodMs, volatilityPips,
 } from '../data/marketEngine';
 import { loadSettings } from '../data/settings';
 import { fetchTvHistory } from '../data/tvClient';
@@ -32,14 +32,15 @@ const closeLabel = (ms) => {
 };
 
 // Wall-clock countdown to the next candle close on every timeframe. The bars
-// are epoch-aligned, so this needs no feed — only the tape being open.
-function BarCountdown({ tf, onTfChange }) {
+// are epoch-aligned, so this needs no feed — only the tape being open, which
+// for crypto pairs means always.
+function BarCountdown({ symbol, tf, onTfChange }) {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     const id = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(id);
   }, []);
-  const closed = marketClosed(new Date(now)).closed;
+  const closed = symbolMarketClosed(symbol, new Date(now)).closed;
   return (
     <div className={`bar-close${closed ? ' shut' : ''}`}>
       <span className="bc-k">
@@ -267,7 +268,7 @@ export default function PriceChart({ pair, symbol, tf, onTfChange, signal }) {
         </div>
       </div>
 
-      <BarCountdown tf={tf} onTfChange={onTfChange} />
+      <BarCountdown symbol={symbol} tf={tf} onTfChange={onTfChange} />
 
       <div className="stat-tiles">
         <div className="stat-tile">
