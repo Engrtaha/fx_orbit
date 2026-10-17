@@ -1,4 +1,6 @@
 import { useEffect, useState } from 'react';
+import { Moon } from 'lucide-react';
+import { marketClosed, reopenLabel } from '../data/marketEngine';
 
 const SESSIONS = [
   {
@@ -39,6 +41,12 @@ export default function SessionsPage() {
   const hour = now.getUTCHours() + now.getUTCMinutes() / 60;
   const hhmm = `${String(now.getUTCHours()).padStart(2, '0')}:${String(now.getUTCMinutes()).padStart(2, '0')}`;
 
+  // These are clock windows, not market state: over the weekend the tape is
+  // shut even while London or New York "should" be open, so nothing on this
+  // page may claim LIVE until the desk reopens.
+  const closed = marketClosed(now);
+  const shut = closed.closed;
+
   return (
     <div className="page sessions-page">
       <p className="strat-lead rise">Session times, macro kill zones &amp; optimal trading windows</p>
@@ -50,21 +58,35 @@ export default function SessionsPage() {
         </div>
         <div className="session-chips">
           {SESSIONS.map((s) => {
-            const live = inWindow(s.utc, hour);
+            const live = !shut && inWindow(s.utc, hour);
             return (
-              <span key={s.key} className={`sess-chip${live ? ' live' : ''}`} style={live ? { '--chip': s.color } : undefined}>
+              <span key={s.key} className={`sess-chip${live ? ' live' : ''}${shut ? ' shut' : ''}`} style={live ? { '--chip': s.color } : undefined}>
                 {s.short}
                 {live && <i />}
                 {live && <b>LIVE</b>}
+                {shut && <b>CLOSED</b>}
               </span>
             );
           })}
         </div>
       </section>
 
+      {shut && (
+        <div className="sess-closed rise" style={{ animationDelay: '60ms' }}>
+          <Moon size={17} />
+          <div>
+            <b>Market closed for the weekend</b>
+            <span>
+              The session and kill-zone windows below are clock times only — the FX tape shut
+              Friday 22:00 UTC and reopens {reopenLabel(closed.reopensAt)}. Crypto pairs trade 24/7.
+            </span>
+          </div>
+        </div>
+      )}
+
       <div className="session-cards">
         {SESSIONS.map((s, i) => {
-          const live = inWindow(s.utc, hour);
+          const live = !shut && inWindow(s.utc, hour);
           return (
             <section
               key={s.key}
@@ -91,7 +113,7 @@ export default function SessionsPage() {
         </div>
         <div className="kz-list">
           {KILL_ZONES.map((kz) => (
-            <div key={kz.name} className={`kz-row${inWindow(kz.range, hour) ? ' active' : ''}`}>
+            <div key={kz.name} className={`kz-row${!shut && inWindow(kz.range, hour) ? ' active' : ''}`}>
               <span className="kz-badge">KZ</span>
               <div className="kz-body">
                 <b>{kz.name}</b>
