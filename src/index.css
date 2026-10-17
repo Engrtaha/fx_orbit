@@ -459,7 +459,10 @@ body::after {
 
 .stat-tiles {
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  /* auto-fit, not a fixed 5: crypto quotes ("81,403.7 / 81,431.7") are far
+     wider than FX pips, and a squeezed 5-column row let them paint over the
+     neighbouring tile. Narrow panels reflow to fewer, wider tiles. */
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
   gap: 10px;
   padding: 6px 18px 12px;
 }
@@ -471,7 +474,7 @@ body::after {
   min-width: 0;
 }
 .stat-tile .k { font-size: 9.5px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--faint); font-weight: 600; }
-.stat-tile .v { font-family: var(--mono); font-size: 13.5px; font-weight: 600; margin-top: 3px; white-space: nowrap; }
+.stat-tile .v { font-family: var(--mono); font-size: 13.5px; font-weight: 600; margin-top: 3px; overflow-wrap: anywhere; }
 .stat-tile .v.cyan { color: var(--cyan); }
 .stat-tile .v.violet { color: #a78bfa; }
 

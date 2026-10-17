@@ -8,6 +8,10 @@ import { UNIVERSE, GROUPS, AI_PROVIDERS, loadSettings, saveSettings, resetSettin
 import { testTvConnection, subscribeTvStatus, getTvStatus } from '../data/tvClient';
 import { aiProviderOf, aiAuthHeaders, aiSupportsVision, unloadOtherOllamaModels } from '../utils/ai';
 
+// Ollama lists one tag twice when the model sits behind two manifests on disk,
+// and these ids are React keys + the installed count — dedupe at the source.
+const modelIds = (payload) => [...new Set((payload?.data ?? []).map((m) => m.id).filter(Boolean))];
+
 export default function SettingsPage() {
   const [settings, setSettings] = useState(() => loadSettings());
   const [showAiKey, setShowAiKey] = useState(false);
@@ -33,7 +37,7 @@ export default function SettingsPage() {
       try {
         const res = await fetch(`${settings.aiBaseUrl.replace(/\/$/, '')}/models`);
         if (!res.ok) return;
-        const ids = ((await res.json())?.data ?? []).map((m) => m.id).filter(Boolean);
+        const ids = modelIds(await res.json());
         if (!cancelled && ids.length) setOllamaModels(ids);
       } catch { /* Ollama is down — the pills simply show no install status */ }
     };
@@ -131,7 +135,7 @@ export default function SettingsPage() {
       const res = await fetch(`${settings.aiBaseUrl.replace(/\/$/, '')}/models`);
       if (!res.ok) throw new Error(`responded ${res.status}`);
       const data = await res.json();
-      const ids = (data.data ?? []).map((m) => m.id).filter(Boolean);
+      const ids = modelIds(data);
       setOllamaModels(ids);
       setModelsHint(ids.length
         ? { ok: true, msg: `${ids.length} model${ids.length === 1 ? '' : 's'} installed (${Math.round(performance.now() - t0)} ms)` }
