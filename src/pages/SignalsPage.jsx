@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import {
-  Zap, ChevronDown, ArrowDownRight, ArrowUpRight, Loader2, Minus, Radio, History, Moon, Clock,
+  Zap, ChevronDown, ArrowDownRight, ArrowUpRight, Loader2, Minus, Radio, History, Moon, Clock, Bitcoin,
 } from 'lucide-react';
 import {
   engine, fmt, marketClosed, symbolMarketClosed, reopenLabel, TIMEFRAMES,
@@ -53,9 +53,16 @@ export default function SignalsPage() {
 
   // The engine loads the universe asynchronously — until it arrives the raw
   // selection can point outside the snapshot, so resolve it against live pairs.
-  const pair = pairs.some((p) => p.symbol === pairSel)
+  // Over the weekend the generator only serves always-open (crypto) pairs: FX
+  // options stay visible but disabled below, and a selection that lands on a
+  // shut desk falls through to the first crypto pair.
+  const mkt = marketClosed();
+  const weekend = mkt.closed;
+  const openPairs = weekend ? pairs.filter((p) => p.alwaysOpen) : pairs;
+
+  const pair = openPairs.some((p) => p.symbol === pairSel)
     ? pairSel
-    : (pairs.some((p) => p.symbol === settings.defaultPair) ? settings.defaultPair : pairs[0]?.symbol ?? pairSel);
+    : (openPairs.some((p) => p.symbol === settings.defaultPair) ? settings.defaultPair : openPairs[0]?.symbol ?? pairSel);
 
   // The engine ticks every second, so this re-evaluates across the close/open
   // boundary without any extra timer. The close binds the selected pair only —
@@ -117,7 +124,14 @@ export default function SignalsPage() {
 
         <div className="sig-select-wrap">
           <select className="sig-select" value={pair} onChange={(e) => { setPair(e.target.value); setResult(null); }}>
-            {pairs.map((p) => <option key={p.symbol} value={p.symbol}>{p.symbol}</option>)}
+            {pairs.map((p) => {
+              const shut = weekend && !p.alwaysOpen;
+              return (
+                <option key={p.symbol} value={p.symbol} disabled={shut}>
+                  {p.symbol}{shut ? ' — market closed' : ''}
+                </option>
+              );
+            })}
           </select>
           <ChevronDown size={16} className="sig-caret" />
         </div>
@@ -152,6 +166,22 @@ export default function SignalsPage() {
           <button className={`mode-btn${mode === 'ai' ? ' on' : ''}`} onClick={() => setMode('ai')}>AI Best Strategy</button>
         </div>
 
+        {weekend && (
+          <div className="sig-weekend">
+            <Bitcoin size={17} />
+            <div>
+              <b>Forex market closed — crypto only</b>
+              <span>
+                It's the weekend: FX and index pairs can't generate signals until the tape reopens{' '}
+                {reopenLabel(mkt.reopensAt)}. Crypto trades 24/7
+                {openPairs.length > 0
+                  ? ' — pick a crypto pair above.'
+                  : ' — enable a crypto pair in Settings to trade the weekend.'}
+              </span>
+            </div>
+          </div>
+        )}
+
         {closed.closed && (
           <div className="sig-closed">
             <Moon size={17} />
@@ -176,7 +206,7 @@ export default function SignalsPage() {
           <span className="panel-title"><Radio size={14} /> Active signals</span>
           <span className="panel-sub">
             {liveSigs.length} live · held to TP/SL, then regenerated
-            {marketClosed().closed ? ' — FX signals rest over the weekend, crypto signals keep running' : ''}
+            {weekend ? ' — FX signals rest over the weekend, crypto signals keep running' : ''}
           </span>
         </div>
         {liveSigs.length === 0 && (
