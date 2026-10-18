@@ -1,6 +1,21 @@
 import { AI_PROVIDERS } from '../data/settings';
+import { fetchJson, AI_TIMEOUT_MS } from './http';
 
 export const aiProviderOf = (s) => (s?.aiProvider && AI_PROVIDERS[s.aiProvider] ? s.aiProvider : 'openai');
+
+// The base URL is free text in Settings and the Authorization header is attached
+// to whatever it points at, so it is validated here once instead of at each of
+// the five call sites: anything that is not a plain http(s) origin can neither
+// receive a key nor be reached by a `javascript:`/`file:` payload.
+export function aiEndpoint(settings, path) {
+  const fallback = AI_PROVIDERS[aiProviderOf(settings)].base;
+  const raw = String(settings?.aiBaseUrl || fallback).trim().replace(/\/+$/, '');
+  if (!/^https?:\/\/[^\s/]+(\/.*)?$/.test(raw)) throw new Error('AI base URL must start with http:// or https://');
+  return `${raw}${path}`;
+}
+
+export const chatEndpoint = (settings) => aiEndpoint(settings, '/chat/completions');
+export const modelsEndpoint = (settings) => aiEndpoint(settings, '/models');
 
 export function aiReady(s = {}) {
   return AI_PROVIDERS[aiProviderOf(s)].keyRequired ? !!s.aiApiKey : true;
@@ -39,19 +54,20 @@ export async function unloadOtherOllamaModels(settings) {
   if (settings?.aiProvider !== 'ollama' || !/^https?:\/\//.test(base)) return [];
   const root = base.replace(/\/v1$/, '');
   try {
-    const res = await fetch(`${root}/api/ps`);
-    if (!res.ok) return [];
-    const data = await res.json();
+    const data = await fetchJson(`${root}/api/ps`, { timeoutMs: 5000 });
     const keep = String(settings.aiModel ?? '').trim();
     const stopped = [];
     for (const m of data?.models ?? []) {
       const name = String(m?.name ?? '');
       if (!name || name === keep) continue;
       try {
+        // /api/generate answers as a stream, not a JSON document, so this one
+        // call is status-checked rather than parsed.
         const un = await fetch(`${root}/api/generate`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ model: name, keep_alive: 0 }),
+          signal: AbortSignal.timeout(5000),
         });
         if (un.ok) stopped.push(name);
       } catch { /* daemon went away mid-way — nothing to report */ }
@@ -174,14 +190,13 @@ export function attachmentContent(prompt, files, { vision = true } = {}) {
 // One OpenAI-compatible chat call for every flow in the app. Content parts may
 // be a string or the multimodal array built by attachmentContent().
 export async function aiChat(settings, messages, { temperature = 0.2 } = {}) {
-  const res = await fetch(`${settings.aiBaseUrl || 'https://api.openai.com/v1'}/chat/completions`, {
+  const body = await fetchJson(chatEndpoint(settings), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...aiAuthHeaders(settings) },
     body: JSON.stringify({ model: settings.aiModel || 'gpt-4o-mini', temperature, messages }),
+    timeoutMs: AI_TIMEOUT_MS,
   });
-  if (!res.ok) throw new Error(`AI API responded ${res.status}`);
-  const data = await res.json();
-  return data.choices?.[0]?.message?.content ?? '';
+  return body.choices?.[0]?.message?.content ?? '';
 }
 
 // Local models wrap JSON in prose and sometimes emit more than one object, so a

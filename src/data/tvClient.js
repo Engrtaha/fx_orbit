@@ -6,6 +6,7 @@
 
 import { engine } from './marketEngine';
 import { loadSettings } from './settings';
+import { fetchJson } from '../utils/http';
 
 let ws = null;
 let retryTimer = null;
@@ -48,9 +49,9 @@ export async function testTvConnection(baseUrl) {
 // Fetch + ingest full history for one symbol/timeframe (chart backfill).
 export async function fetchTvHistory(baseUrl, symbol, tf) {
   const target = `${(baseUrl || '').replace(/\/$/, '')}/api/candles?symbol=${encodeURIComponent(symbol)}&tf=${encodeURIComponent(tf)}&count=300`;
-  const res = await fetch(target);
-  const body = await res.json();
-  if (!res.ok || !body.ok) throw new Error(body.error || `HTTP ${res.status}`);
+  const body = await fetchJson(target);
+  if (!body.ok) throw new Error(body.error || 'The bridge returned no candles');
+  if (!Array.isArray(body.candles)) throw new Error('Malformed candle response');
   engine.applyTvHistory(symbol, tf, body.candles);
   return body.candles.length;
 }

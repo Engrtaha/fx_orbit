@@ -5,7 +5,8 @@
 
 import { engine, symbolMarketClosed, volatilityPips } from './marketEngine';
 import { loadSettings } from './settings';
-import { parseJsonLoose, aiReady, aiAuthHeaders } from '../utils/ai';
+import { parseJsonLoose, aiReady, aiAuthHeaders, chatEndpoint } from '../utils/ai';
+import { fetchJson, AI_TIMEOUT_MS } from '../utils/http';
 
 const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
 const num = (v) => { const n = Number(v); return Number.isFinite(n) ? n : null; };
@@ -44,7 +45,7 @@ function signalContext(s, tf) {
 }
 
 async function callSignalModel(settings, payload) {
-  const res = await fetch(`${settings.aiBaseUrl || 'https://api.openai.com/v1'}/chat/completions`, {
+  const body = await fetchJson(chatEndpoint(settings), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...aiAuthHeaders(settings) },
     body: JSON.stringify({
@@ -55,10 +56,9 @@ async function callSignalModel(settings, payload) {
         { role: 'user', content: JSON.stringify(payload) },
       ],
     }),
+    timeoutMs: AI_TIMEOUT_MS,
   });
-  if (!res.ok) throw new Error(`AI model responded ${res.status}`);
-  const data = await res.json();
-  const parsed = parseJsonLoose(data.choices?.[0]?.message?.content ?? '');
+  const parsed = parseJsonLoose(body.choices?.[0]?.message?.content ?? '');
   if (!parsed) throw new Error('Could not parse the model response.');
   return parsed;
 }
@@ -150,14 +150,30 @@ const listeners = new Set();
 function loadBook() {
   try {
     const raw = localStorage.getItem(SIGNALS_KEY);
-    if (raw) {
-      const parsed = JSON.parse(raw);
-      if (parsed && Array.isArray(parsed.active)) {
-        return { active: parsed.active, closed: Array.isArray(parsed.closed) ? parsed.closed : [] };
-      }
-    }
+    if (!raw) return { active: [], closed: [] };
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object') return { active: [], closed: [] };
+    // An entry missing its levels would render `fmt(undefined)` and, worse, could
+    // never be scored for a TP/SL hit — so it would sit in the book forever.
+    const active = Array.isArray(parsed.active) ? parsed.active.filter(isLiveSignal) : [];
+    const closed = Array.isArray(parsed.closed) ? parsed.closed.filter(isOutcome) : [];
+    return { active, closed };
   } catch { /* corrupted or unavailable — start fresh */ }
   return { active: [], closed: [] };
+}
+
+const finite = (v) => typeof v === 'number' && Number.isFinite(v);
+
+function isLiveSignal(s) {
+  return !!s && typeof s.id === 'string' && typeof s.symbol === 'string'
+    && (s.side === 'LONG' || s.side === 'SHORT')
+    && finite(s.entry) && finite(s.sl) && finite(s.tp) && finite(s.decimals);
+}
+
+function isOutcome(o) {
+  return !!o && typeof o.symbol === 'string'
+    && (o.status === 'tp' || o.status === 'sl')
+    && finite(o.pips) && finite(o.closedAt);
 }
 
 const state = () => (book ??= loadBook());

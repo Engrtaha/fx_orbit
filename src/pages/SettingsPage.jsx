@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   User, SlidersHorizontal, CandlestickChart, Sparkles, Search, Eye, EyeOff,
   Save, RotateCcw, Check, Activity, Download,
@@ -6,7 +6,11 @@ import {
 import { engine } from '../data/marketEngine';
 import { UNIVERSE, GROUPS, AI_PROVIDERS, loadSettings, saveSettings, resetSettings } from '../data/settings';
 import { testTvConnection, subscribeTvStatus, getTvStatus } from '../data/tvClient';
-import { aiProviderOf, aiAuthHeaders, aiSupportsVision, unloadOtherOllamaModels } from '../utils/ai';
+import {
+  aiProviderOf, aiAuthHeaders, aiSupportsVision, unloadOtherOllamaModels,
+  chatEndpoint, modelsEndpoint,
+} from '../utils/ai';
+import { fetchJson, BRIDGE_TIMEOUT_MS, AI_TIMEOUT_MS } from '../utils/http';
 
 // Ollama lists one tag twice when the model sits behind two manifests on disk,
 // and these ids are React keys + the installed count — dedupe at the source.
@@ -33,26 +37,31 @@ export default function SettingsPage() {
   useEffect(() => {
     if (settings.aiProvider !== 'ollama') return undefined;
     let cancelled = false;
+    const target = { aiProvider: settings.aiProvider, aiBaseUrl: settings.aiBaseUrl };
     const check = async () => {
       try {
-        const res = await fetch(`${settings.aiBaseUrl.replace(/\/$/, '')}/models`);
-        if (!res.ok) return;
-        const ids = modelIds(await res.json());
+        const ids = modelIds(await fetchJson(modelsEndpoint(target)));
         if (!cancelled && ids.length) setOllamaModels(ids);
       } catch { /* Ollama is down — the pills simply show no install status */ }
     };
-    void check();
+    // Debounced, and re-armed rather than fired: aiBaseUrl is a text field, so an
+    // immediate check sent one /models request per character typed into it.
+    const first = setTimeout(() => void check(), 600);
     const timer = setInterval(() => void check(), 15000);
-    return () => { cancelled = true; clearInterval(timer); };
+    return () => { cancelled = true; clearTimeout(first); clearInterval(timer); };
   }, [settings.aiProvider, settings.aiBaseUrl]);
   const [selected, setSelected] = useState(() => new Set(settings.pairs));
   const [resetArmed, setResetArmed] = useState(false);
   const [toast, setToast] = useState(null);
+  const toastTimer = useRef(null);
 
   const notify = (msg) => {
+    clearTimeout(toastTimer.current);
     setToast(msg);
-    setTimeout(() => setToast(null), 2200);
+    toastTimer.current = setTimeout(() => setToast(null), 2200);
   };
+
+  useEffect(() => () => clearTimeout(toastTimer.current), []);
 
   const grouped = useMemo(() => {
     const q = query.trim().toUpperCase();
@@ -132,10 +141,7 @@ export default function SettingsPage() {
     setModelsHint(null);
     const t0 = performance.now();
     try {
-      const res = await fetch(`${settings.aiBaseUrl.replace(/\/$/, '')}/models`);
-      if (!res.ok) throw new Error(`responded ${res.status}`);
-      const data = await res.json();
-      const ids = modelIds(data);
+      const ids = modelIds(await fetchJson(modelsEndpoint(settings), { timeoutMs: BRIDGE_TIMEOUT_MS }));
       setOllamaModels(ids);
       setModelsHint(ids.length
         ? { ok: true, msg: `${ids.length} model${ids.length === 1 ? '' : 's'} installed (${Math.round(performance.now() - t0)} ms)` }
@@ -155,7 +161,7 @@ export default function SettingsPage() {
     setAiTest(null);
     const t0 = performance.now();
     try {
-      const res = await fetch(`${settings.aiBaseUrl.replace(/\/$/, '')}/chat/completions`, {
+      const data = await fetchJson(chatEndpoint(settings), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...aiAuthHeaders(settings) },
         body: JSON.stringify({
@@ -164,9 +170,8 @@ export default function SettingsPage() {
           max_tokens: 200,
           messages: [{ role: 'user', content: 'Reply with exactly: OK' }],
         }),
+        timeoutMs: AI_TIMEOUT_MS,
       });
-      if (!res.ok) throw new Error(`responded ${res.status}`);
-      const data = await res.json();
       const text = (data.choices?.[0]?.message?.content ?? '').trim().slice(0, 60);
       setAiTest({ ok: true, msg: `${settings.aiModel.trim() || prov.model} replied "${text || '(empty)'}" in ${((performance.now() - t0) / 1000).toFixed(1)} s` });
     } catch (err) {
@@ -177,9 +182,7 @@ export default function SettingsPage() {
       if (provider === 'ollama') {
         // A daemon that is down and a model that is still downloading both show
         // up as a failure here — ask Ollama which one it is before reporting.
-        const listed = await fetch(`${settings.aiBaseUrl.replace(/\/$/, '')}/models`)
-          .then((r) => (r.ok ? r.json() : null))
-          .catch(() => null);
+        const listed = await fetchJson(modelsEndpoint(settings)).catch(() => null);
         if (!listed) {
           why = `Ollama is not reachable at ${settings.aiBaseUrl} — start it with: ollama serve`;
         } else if (!(listed.data ?? []).some((m) => m.id === model)) {

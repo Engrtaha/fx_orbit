@@ -5,7 +5,8 @@
 
 import { engine, volatilityPips } from './marketEngine';
 import { UNIVERSE, loadSettings } from './settings';
-import { parseJsonLoose, aiReady, aiAuthHeaders } from '../utils/ai';
+import { parseJsonLoose, aiReady, aiAuthHeaders, chatEndpoint } from '../utils/ai';
+import { fetchJson, BRIDGE_TIMEOUT_MS, AI_TIMEOUT_MS } from '../utils/http';
 
 export const NEWS_PROVIDERS = [
   { id: 'rss', label: 'RSS — FXStreet / ForexLive / Investing.com', hint: 'no key needed · headlines land within minutes' },
@@ -56,9 +57,9 @@ export async function fetchNewsFeed() {
   const provider = settings.newsProvider || 'alphavantage';
   const params = new URLSearchParams({ token, newsProvider: provider, sources: 'calendar,news' });
   if (provider === 'finnhub') params.set('category', settings.newsCategory || 'forex');
-  const res = await fetch(`${bridgeUrl()}/api/news?${params.toString()}`);
-  const body = await res.json().catch(() => null);
-  if (!res.ok || !body?.ok) throw new Error(body?.error ?? `News fetch failed (HTTP ${res.status})`);
+  const body = await fetchJson(`${bridgeUrl()}/api/news?${params.toString()}`, { timeoutMs: BRIDGE_TIMEOUT_MS })
+    .catch((err) => { throw new Error(`News fetch failed — ${err.message}`); });
+  if (!body.ok) throw new Error(body.error ?? 'News fetch failed.');
   const items = (body.items ?? []).filter((i) => i.time && i.title).sort((a, b) => b.time - a.time);
   if (!items.length) throw new Error((body.warnings ?? [])[0] ?? 'No news returned by the configured sources.');
   return { items, warnings: body.warnings ?? [], fetchedAt: body.fetchedAt, provider };
@@ -216,7 +217,7 @@ const ANALYST_SYSTEM = [
 
 async function callAnalyst(settings, item, context) {
   const allowed = context.map((c) => c.symbol).join(', ');
-  const res = await fetch(`${settings.aiBaseUrl || 'https://api.openai.com/v1'}/chat/completions`, {
+  const body = await fetchJson(chatEndpoint(settings), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...aiAuthHeaders(settings) },
     body: JSON.stringify({
@@ -227,10 +228,9 @@ async function callAnalyst(settings, item, context) {
         { role: 'user', content: JSON.stringify({ item, market: context }) },
       ],
     }),
+    timeoutMs: AI_TIMEOUT_MS,
   });
-  if (!res.ok) throw new Error(`AI model responded ${res.status}`);
-  const data = await res.json();
-  const parsed = parseJsonLoose(data.choices?.[0]?.message?.content ?? '');
+  const parsed = parseJsonLoose(body.choices?.[0]?.message?.content ?? '');
   if (!parsed) throw new Error('Could not parse the model response.');
   return parsed;
 }
@@ -329,8 +329,11 @@ export function closeNewsTrade(id) {
 export function tradeLive(t) {
   const s = engine.getState(t.symbol);
   const dir = t.side === 'BUY' ? 1 : -1;
-  const mark = s ? s.mid : t.exit ?? t.entry;
-  const pips = ((mark - t.entry) * dir) / (s ? s.pip : 0.0001);
+  const mark = s ? s.mid : (t.exit || t.entry);
+  // pipFor reads the universe catalog, not the live state: a trade on a pair that
+  // is no longer enabled still has to be priced in its own pip, and the old
+  // 0.0001 guess was 100x wrong for JPY crosses and 10000x for DOGE.
+  const pips = ((mark - t.entry) * dir) / engine.pipFor(t.symbol);
   return { pips: +pips.toFixed(1), pnl: +(pips * (t.lots / 0.1)).toFixed(2) };
 }
 

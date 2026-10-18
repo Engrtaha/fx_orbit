@@ -9,7 +9,7 @@ import {
   NEWS_CATEGORIES, NEWS_PROVIDERS, analyzeItem, closeNewsTrade, deskAnalysis, fetchNewsFeed, itemInUniverse,
   itemTitle, newsTrades, placeNewsTrade, riskFlags, tradeLive, universeCurrencies,
 } from '../data/newsEngine';
-import { downscale, parseJsonLoose, aiReady, aiAuthHeaders, aiSupportsVision } from '../utils/ai';
+import { downscale, readFile, parseJsonLoose, aiReady, aiChat, aiSupportsVision } from '../utils/ai';
 
 const SCREENSHOT_PROMPT = [
   'You are FxOrbit, a macro news-desk analyst inside a trading terminal.',
@@ -78,11 +78,17 @@ export default function NewsPage() {
   const [shotResult, setShotResult] = useState(null);
   const [shotError, setShotError] = useState(null);
   const fileRef = useRef(null);
+  const toastTimer = useRef(null);
 
   const notify = (msg) => {
+    // clearTimeout first: a second message used to be cut short by the first
+    // one's timer, so placing a trade and immediately closing it showed nothing.
+    clearTimeout(toastTimer.current);
     setToast(msg);
-    setTimeout(() => setToast(null), 2400);
+    toastTimer.current = setTimeout(() => setToast(null), 2400);
   };
+
+  useEffect(() => () => clearTimeout(toastTimer.current), []);
 
   useEffect(() => {
     const unsub = engine.subscribe(() => setTick((t) => t + 1));
@@ -163,11 +169,13 @@ export default function NewsPage() {
 
   const pickFile = async (file) => {
     if (!file) return;
-    const raw = await new Promise((res) => {
-      const r = new FileReader();
-      r.onload = () => res(r.result);
-      r.readAsDataURL(file);
-    });
+    // readFile resolves null on a failed read; the hand-rolled promise awaited
+    // here before had no onerror, so an unreadable file hung the page forever.
+    const raw = await readFile(file);
+    if (!raw) {
+      setShotError('That file could not be read as an image — try a PNG or JPG.');
+      return;
+    }
     setImage({ name: file.name, dataUrl: await downscale(raw) });
     setShotResult(null);
     setShotError(null);
@@ -181,27 +189,16 @@ export default function NewsPage() {
     const s = loadSettings();
     try {
       if (aiReady(s) && aiSupportsVision(s)) {
-        const res = await fetch(`${s.aiBaseUrl || 'https://api.openai.com/v1'}/chat/completions`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', ...aiAuthHeaders(s) },
-          body: JSON.stringify({
-            model: s.aiModel || 'gpt-4o-mini',
-            temperature: 0.2,
-            messages: [
-              { role: 'system', content: SCREENSHOT_PROMPT },
-              {
-                role: 'user',
-                content: [
-                  { type: 'text', text: 'Analyze this news screenshot and assess its market impact.' },
-                  { type: 'image_url', image_url: { url: image.dataUrl } },
-                ],
-              },
+        const text = (await aiChat(s, [
+          { role: 'system', content: SCREENSHOT_PROMPT },
+          {
+            role: 'user',
+            content: [
+              { type: 'text', text: 'Analyze this news screenshot and assess its market impact.' },
+              { type: 'image_url', image_url: { url: image.dataUrl } },
             ],
-          }),
-        });
-        if (!res.ok) throw new Error(`AI API responded ${res.status}`);
-        const data = await res.json();
-        const text = String(data.choices?.[0]?.message?.content ?? '').trim();
+          },
+        ])).trim();
         const parsed = parseJsonLoose(text);
         if (parsed) {
           setShotResult({ ...parsed, simulated: false });

@@ -6,6 +6,7 @@
 
 import { engine } from './marketEngine';
 import { loadSettings } from './settings';
+import { fetchJson } from '../utils/http';
 
 const SYNC_MS = 10_000;
 const MAX_ROWS = 500;
@@ -17,9 +18,8 @@ const bridgeUrl = () => (loadSettings().tvBackendUrl || 'http://localhost:5178')
 // browser's (possibly simulated) book is the truth.
 export async function hydrateTrades() {
   try {
-    const res = await fetch(`${bridgeUrl()}/api/trades?limit=${MAX_ROWS}`);
-    const body = await res.json().catch(() => null);
-    if (!body?.ok || !Array.isArray(body.trades)) return null;
+    const body = await fetchJson(`${bridgeUrl()}/api/trades?limit=${MAX_ROWS}`);
+    if (!body.ok || !Array.isArray(body.trades)) return null;
     return engine.loadTrades(body.trades);
   } catch {
     return null;
@@ -34,7 +34,7 @@ export async function syncTrades() {
   try {
     const trades = engine.getTrades().slice(0, MAX_ROWS);
     if (!trades.length) return;
-    await fetch(`${bridgeUrl()}/api/trades`, {
+    await fetchJson(`${bridgeUrl()}/api/trades`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ trades }),
