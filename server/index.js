@@ -11,74 +11,21 @@ import {
   getQuote,
   watchQuotes,
 } from './vendor/Tradingview-API/dist/data/index.js';
-import { initDb, dbStatus } from './db/index.js';
+import {
+  isLoopback, hostAllowed, allowedOrigin, requestUrl, sanitizeSubscribe, hasOwn,
+} from './security.js';
+import {
+  TF_TO_TV, toTvSymbol, normCandle, normHistory, normQuote, HISTORY_COUNT, MAX_CANDLES,
+} from './feed.js';
+import { initDb, closeDb, dbStatus } from './db/index.js';
 import { saveNewsItems, recentNews, newsCount } from './db/news.js';
 import { saveTrades, loadTrades, tradeCount } from './db/tradeHistory.js';
 
 const PORT = Number(process.env.TV_PORT || 5178);
 // '::' = dual-stack, so ws://localhost and ws://127.0.0.1 both resolve
 const HOST = process.env.TV_HOST || '::';
-const HISTORY_COUNT = 300;
-const MAX_CANDLES = 320;
-
-// FxOrbit timeframe → TradingView timeframe
-export const TF_TO_TV = { '1m': '1', '5m': '5', '15m': '15', '1H': '60', '4H': '240', '1D': 'D' };
-
-const TV_INDICES = {
-  US100: 'CAPITALCOM:US100', US500: 'CAPITALCOM:US500', US30: 'CAPITALCOM:US30',
-  GER40: 'CAPITALCOM:GER40', UK100: 'CAPITALCOM:UK100', FR40: 'CAPITALCOM:FR40',
-  JP225: 'FPMARKETS:JP225', HK50: 'CAPITALCOM:HK50',
-};
-const TV_STOCKS = new Set(['AAPL', 'NVDA', 'TSLA', 'MSFT', 'AMZN', 'META']);
-// Crypto trades against USD on Coinbase; TV's flagship BINANCE pairs quote USDT.
-const TV_CRYPTO = {
-  'BTC/USD': 'COINBASE:BTCUSD', 'ETH/USD': 'COINBASE:ETHUSD', 'SOL/USD': 'COINBASE:SOLUSD',
-  'BNB/USD': 'COINBASE:BNBUSD', 'XRP/USD': 'COINBASE:XRPUSD', 'DOGE/USD': 'COINBASE:DOGEUSD',
-  'ADA/USD': 'COINBASE:ADAUSD',
-};
-
-export function toTvSymbol(sym) {
-  if (TV_CRYPTO[sym]) return TV_CRYPTO[sym];
-  if (TV_INDICES[sym]) return TV_INDICES[sym];
-  if (TV_STOCKS.has(sym)) return `NASDAQ:${sym}`;
-  return `FX:${sym.replace('/', '')}`;
-}
-
-// Normalize a TradingView candle into the FxOrbit serialization standard:
-// unix-second time, plain floats, integer volume, ascending unique order.
-function normCandle(c) {
-  return {
-    time: Math.floor(c.time),
-    open: +c.open,
-    high: +c.high,
-    low: +c.low,
-    close: +c.close,
-    volume: Math.round(c.volume ?? 0),
-  };
-}
-
-function normHistory(candles) {
-  const sorted = [...candles].map(normCandle).sort((a, b) => a.time - b.time);
-  const out = [];
-  for (const c of sorted) {
-    if (out.length && out[out.length - 1].time === c.time) out[out.length - 1] = c;
-    else out.push(c);
-  }
-  while (out.length > MAX_CANDLES) out.shift();
-  return out;
-}
-
-function normQuote(q) {
-  return {
-    price: q.lp ?? null,
-    bid: q.bid ?? null,
-    ask: q.ask ?? null,
-    change: q.ch ?? null,
-    changePct: q.chp ?? null,
-    volume: q.volume != null ? Math.round(q.volume) : null,
-    time: q.lp_time ?? null,
-  };
-}
+const ALLOW_LAN = process.env.TV_ALLOW_LAN === '1';
+const UPSTREAM_TIMEOUT_MS = 15_000;
 
 // ── News proxy (ForexFactory calendar · Alpha Vantage / Finnhub headlines) ───
 // Proxied server-side so the browser never hits a third-party CORS wall and the
@@ -177,7 +124,7 @@ async function fhGet(path, params, token) {
   const url = new URL(FH_BASE + path);
   for (const [k, v] of Object.entries(params)) if (v) url.searchParams.set(k, v);
   url.searchParams.set('token', token);
-  const res = await fetch(url, { headers: { Accept: 'application/json' } });
+  const res = await fetch(url, { headers: { Accept: 'application/json' }, signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS) });
   const body = await res.json().catch(() => null);
   if (!res.ok) throw new Error(String(body?.error ?? `Finnhub HTTP ${res.status}`));
   return body ?? {};
@@ -190,7 +137,7 @@ async function avItems({ token, topics, limit }) {
   url.searchParams.set('sort', 'LATEST');
   url.searchParams.set('limit', String(Math.min(1000, Math.max(50, Number(limit) || 200))));
   if (token) url.searchParams.set('apikey', token);
-  const res = await fetch(url, { headers: { Accept: 'application/json' } });
+  const res = await fetch(url, { headers: { Accept: 'application/json' }, signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS) });
   const body = await res.json().catch(() => null);
   if (!res.ok) throw new Error(`Alpha Vantage HTTP ${res.status}`);
   if (body?.['Error Message']) throw new Error(String(body['Error Message']));
@@ -294,7 +241,7 @@ function ffItem(e) {
 }
 
 async function ffItems() {
-  const res = await fetch(FF_URL, { headers: { Accept: 'application/json' } });
+  const res = await fetch(FF_URL, { headers: { Accept: 'application/json' }, signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS) });
   if (!res.ok) throw new Error(`ForexFactory HTTP ${res.status}`);
   const body = await res.json().catch(() => null);
   if (!Array.isArray(body)) throw new Error('ForexFactory returned an unexpected payload');
@@ -382,6 +329,7 @@ async function rssItems() {
     try {
       const res = await fetch(url, {
         headers: { 'User-Agent': RSS_UA, Accept: 'application/rss+xml, application/xml, text/xml' },
+        signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const xml = await res.text();
@@ -492,10 +440,22 @@ const json = (res, code, body) => {
   const payload = JSON.stringify(body);
   res.writeHead(code, {
     'Content-Type': 'application/json',
-    'Access-Control-Allow-Origin': '*',
+    'Content-Length': Buffer.byteLength(payload),
   });
   res.end(payload);
 };
+
+// The terminal's own page may read these responses; nothing else may. An
+// unlisted (or absent) Origin simply gets no CORS header back, so a foreign page
+// can open a socket but can never read a line of the trade archive. The archive
+// and the news key are private local data, so no response is ever cacheable.
+function applyCors(req, res) {
+  const origin = allowedOrigin(req.headers.origin);
+  if (origin) res.setHeader('Access-Control-Allow-Origin', origin);
+  res.setHeader('Vary', 'Origin');
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Cache-Control', 'no-store');
+}
 
 const MAX_BODY = 4 * 1024 * 1024;
 
@@ -521,14 +481,32 @@ function readJson(req) {
   });
 }
 
-const server = createServer(async (req, res) => {
-  const url = new URL(req.url, `http://${req.headers.host}`);
+const REFUSED = (res, why) => json(res, 403, { ok: false, error: why });
+
+// One browser push is the whole visible book; anything bigger is not the app.
+const MAX_SYNC_ROWS = 5000;
+
+async function handle(req, res) {
+  const url = requestUrl(req.url, req.headers.host);
+  if (!url) return json(res, 400, { ok: false, error: 'bad request' });
+
+  // The bind is '::' so both localhost names work, which also puts the bridge on
+  // every interface of the machine. Loopback-only by default; TV_ALLOW_LAN=1
+  // opens it deliberately.
+  if (!ALLOW_LAN && !isLoopback(req.socket.remoteAddress)) {
+    return REFUSED(res, 'bridge accepts local clients only (set TV_ALLOW_LAN=1 to share it)');
+  }
+  // DNS rebinding arrives from 127.0.0.1 with the attacker's Host header, so the
+  // peer check above cannot catch it.
+  if (!hostAllowed(req.headers.host, ALLOW_LAN)) {
+    return REFUSED(res, 'Host header must be a loopback name');
+  }
+  applyCors(req, res);
 
   // The browser sends JSON bodies with a preflight; without this the POST
   // from the terminal is blocked before it reaches the trade routes.
   if (req.method === 'OPTIONS') {
     res.writeHead(204, {
-      'Access-Control-Allow-Origin': '*',
       'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
       'Access-Control-Allow-Headers': 'Content-Type',
       'Access-Control-Max-Age': '86400',
@@ -548,7 +526,7 @@ const server = createServer(async (req, res) => {
 
   if (url.pathname === '/api/quote') {
     const symbol = url.searchParams.get('symbol');
-    if (!symbol) return json(res, 400, { ok: false, error: 'missing symbol' });
+    if (!symbol || symbol.length > 24) return json(res, 400, { ok: false, error: 'missing or oversized symbol' });
     try {
       const tvSymbol = toTvSymbol(symbol);
       const quote = await getQuote(tvSymbol);
@@ -561,8 +539,12 @@ const server = createServer(async (req, res) => {
   if (url.pathname === '/api/candles') {
     const symbol = url.searchParams.get('symbol');
     const tf = url.searchParams.get('tf') || '1m';
-    const count = Math.min(1000, Math.max(1, Number(url.searchParams.get('count')) || HISTORY_COUNT));
-    if (!symbol || !TF_TO_TV[tf]) return json(res, 400, { ok: false, error: 'missing/unknown symbol or tf' });
+    // hasOwn, not truthiness: TF_TO_TV['constructor'] is a function and would
+    // otherwise sail through validation and be handed to TradingView as a tf.
+    if (!symbol || symbol.length > 24 || !hasOwn(TF_TO_TV, tf)) {
+      return json(res, 400, { ok: false, error: 'missing/unknown symbol or tf' });
+    }
+    const count = Math.min(MAX_CANDLES, Math.max(1, Number(url.searchParams.get('count')) || HISTORY_COUNT));
     try {
       const tvSymbol = toTvSymbol(symbol);
       const candles = await getCandles({ symbol: tvSymbol, timeframe: TF_TO_TV[tf], count });
@@ -615,6 +597,9 @@ const server = createServer(async (req, res) => {
     const body = await readJson(req);
     const trades = Array.isArray(body?.trades) ? body.trades : null;
     if (!trades) return json(res, 400, { ok: false, error: 'expected { trades: [...] }' });
+    if (trades.length > MAX_SYNC_ROWS) {
+      return json(res, 413, { ok: false, error: `too many trades in one push (max ${MAX_SYNC_ROWS})` });
+    }
     const stored = await saveTrades(trades);
     return json(res, stored == null ? 503 : 200, {
       ok: stored != null,
@@ -644,6 +629,17 @@ const server = createServer(async (req, res) => {
   }
 
   return json(res, 404, { ok: false, error: 'not found' });
+}
+
+// A handler that throws must never take the process down: under `concurrently -k`
+// a dead bridge also kills Vite, and the browser is left showing a half-rendered
+// page that looks like an app bug.
+const server = createServer((req, res) => {
+  handle(req, res).catch((err) => {
+    console.error('[tv-bridge] request failed:', err?.message ?? err);
+    if (res.headersSent) return res.end();
+    return json(res, 500, { ok: false, error: 'internal error' });
+  });
 });
 
 // ── WebSocket feed ───────────────────────────────────────────────────────────
@@ -653,14 +649,25 @@ const server = createServer(async (req, res) => {
 //                   { type: 'tick',    symbol, ...quote }
 //                   { type: 'error',   symbol, tf?, message }
 
-const wss = new WebSocketServer({ server, path: '/ws' });
+const wss = new WebSocketServer({ server, path: '/ws', maxPayload: 64 * 1024 });
 
 // ws re-emits the HTTP server's errors on the WebSocketServer, and an 'error'
 // event with no listener kills the process — which under `concurrently -k` also
 // takes the Vite dev server down with it.
 wss.on('error', (err) => console.error('[tv-bridge] websocket:', err?.message ?? err));
 
-wss.on('connection', (socket) => {
+wss.on('connection', (socket, request) => {
+  // A websocket is not gated by CORS, so any page in the user's browser could
+  // otherwise open a socket and make the bridge open TradingView sessions at
+  // will. Same local-only rules as the REST side.
+  if (
+    (!ALLOW_LAN && !isLoopback(request.socket?.remoteAddress))
+    || !hostAllowed(request.headers.host, ALLOW_LAN)
+  ) {
+    socket.close(4003, 'bridge accepts local clients only');
+    return;
+  }
+
   const session = { candleWatchers: new Map(), quoteWatcher: null, subsKey: '' };
 
   const stopAll = async () => {
@@ -675,20 +682,17 @@ wss.on('connection', (socket) => {
   };
 
   const send = (msg) => {
-    if (socket.readyState === 1) socket.send(JSON.stringify(msg));
+    if (socket.readyState === 1) {
+      try { socket.send(JSON.stringify(msg)); } catch { /* socket closed mid-send */ }
+    }
   };
 
-  socket.on('message', async (raw) => {
-    let msg;
-    try { msg = JSON.parse(raw.toString()); } catch { return; }
+  // Subscriptions are applied one at a time: two messages arriving back to back
+  // would otherwise both call stopAll() and both build watchers, so the first
+  // set would be lost in the map and stream into a closed session forever.
+  let queue = Promise.resolve();
 
-    if (msg.type !== 'subscribe') return;
-    const symbols = (msg.symbols ?? []).filter(Boolean);
-    const tfs = (msg.tfs ?? []).filter((tf) => TF_TO_TV[tf]);
-    const key = `${symbols.join(',')}|${tfs.join(',')}`;
-    if (key === session.subsKey) return;
-    session.subsKey = key;
-
+  const applySubscribe = async (symbols, tfs) => {
     await stopAll();
 
     // Candle watchers: one per symbol × timeframe
@@ -734,8 +738,23 @@ wss.on('connection', (socket) => {
     }
 
     send({ type: 'ready', symbols, tfs, tvSymbols: Object.fromEntries(symbols.map((s) => [s, toTvSymbol(s)])) });
+  };
+
+  socket.on('message', (raw) => {
+    let msg;
+    try { msg = JSON.parse(raw.toString()); } catch { return; }
+    if (!msg || msg.type !== 'subscribe') return;
+
+    const { symbols, tfs } = sanitizeSubscribe(msg, TF_TO_TV);
+    const key = `${symbols.join(',')}|${tfs.join(',')}`;
+    if (key === session.subsKey) return;
+    session.subsKey = key;
+
+    queue = queue.then(() => applySubscribe(symbols, tfs))
+      .catch((err) => send({ type: 'error', message: String(err?.message ?? err) }));
   });
 
+  socket.on('error', () => { /* a broken socket is closed, not fatal */ });
   socket.on('close', () => { void stopAll(); });
 });
 
@@ -769,7 +788,25 @@ server.on('listening', () => {
   console.log('[tv-bridge] REST: /api/status /api/quote /api/candles /api/news?token=…');
   console.log('[tv-bridge] DB:   /api/trades (GET/POST) /api/news/archive /api/db/stats');
   console.log('[tv-bridge] WS: /ws  { type: "subscribe", symbols, tfs }');
+  console.log(`[tv-bridge] Access: ${ALLOW_LAN ? 'LAN enabled (TV_ALLOW_LAN=1)' : 'loopback clients and the terminal page only'}`);
   void initDb();
 });
+
+// Release the port and the socket pool on the way out, so restarting the dev
+// stack does not leave a half-open bridge holding :5178.
+let closing = false;
+function shutdown(signal) {
+  if (closing) return;
+  closing = true;
+  console.log(`[tv-bridge] ${signal} — closing.`);
+  for (const socket of wss.clients) {
+    try { socket.close(1001, 'bridge shutting down'); } catch { /* already gone */ }
+  }
+  server.close(() => { void closeDb().finally(() => process.exit(0)); });
+  setTimeout(() => process.exit(0), 3000).unref();
+}
+
+process.on('SIGINT', () => shutdown('SIGINT'));
+process.on('SIGTERM', () => shutdown('SIGTERM'));
 
 server.listen(PORT, HOST);
