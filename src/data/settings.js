@@ -102,14 +102,49 @@ const defaults = {
   autoTrade: [],
 };
 
+// localStorage is an outside input, not our own object: a corrupted, hand-edited
+// or older record must never override a default with null (pages call
+// `settings.profileName.split(...)` and `settings.aiBaseUrl.replace(...)` straight
+// away) and must never smuggle in a key the app has no meaning for. Each stored
+// value is kept only when it still has the type its default declares.
+function sanitizeStored(stored) {
+  const src = (stored && typeof stored === 'object' && !Array.isArray(stored)) ? stored : {};
+  const out = {};
+  for (const key of Object.keys(src)) {
+    if (!Object.hasOwn(defaults, key)) continue;
+    const want = defaults[key];
+    const v = src[key];
+    if (want === null) {
+      if (v === null || (v && typeof v === 'object' && !Array.isArray(v))) out[key] = v;
+    } else if (Array.isArray(want)) {
+      if (Array.isArray(v)) out[key] = [...new Set(v.filter((x) => typeof x === 'string' && x))];
+    } else if (typeof want === 'boolean') {
+      if (typeof v === 'boolean') out[key] = v;
+    } else if (typeof want === 'number') {
+      if (typeof v === 'number' && Number.isFinite(v)) out[key] = v;
+    } else if (typeof v === 'string') {
+      out[key] = v;
+    }
+  }
+  return out;
+}
+
 export function loadSettings() {
+  let stored = {};
   try {
     const raw = localStorage.getItem(SETTINGS_KEY);
-    const stored = raw ? JSON.parse(raw) : {};
-    return { ...defaults, ...stored, pairs: stored.pairs ?? defaults.pairs };
+    stored = raw ? JSON.parse(raw) : {};
   } catch {
-    return { ...defaults };
+    stored = {};
   }
+  const next = { ...defaults, ...sanitizeStored(stored) };
+  // An instrument list with nothing usable in it would leave the whole terminal
+  // without a page to draw, so the saved set is only honoured when it survives.
+  // defaultPair is deliberately NOT re-derived here: saveSettings() merges what
+  // this returns, so "fixing" it on read would silently overwrite a pair the
+  // user switched off and means to switch back on. Pages resolve it themselves.
+  if (!next.pairs.length) next.pairs = [...defaults.pairs];
+  return next;
 }
 
 // The whole account model in one place, so Portfolio and Dashboard can never

@@ -3,7 +3,7 @@ import { seedStorage } from './setup.js';
 
 seedStorage({ pairs: ['US100', 'XAU/USD'], defaultPair: 'XAU/USD' });
 const {
-  engine, marketClosed, symbolMarketClosed, volatilityPips, TIMEFRAMES, barCloseIn, tfPeriodMs,
+  engine, fmt, marketClosed, symbolMarketClosed, volatilityPips, TIMEFRAMES, barCloseIn, tfPeriodMs,
 } = await import('../src/data/marketEngine.js');
 const { UNIVERSE } = await import('../src/data/settings.js');
 
@@ -112,15 +112,31 @@ describe('trade lifecycle', () => {
 });
 
 describe('risk-based position sizing', () => {
-  const big = () => seedStorage({ pairs: ['US100', 'XAU/USD'], defaultPair: 'XAU/USD', initialBalance: 100000 });
+  const big = (over = {}) => seedStorage({
+    pairs: ['US100', 'XAU/USD'], defaultPair: 'XAU/USD', initialBalance: 100000, ...over,
+  });
 
-  it('risks the same slice of equity whatever the stop width', () => {
+  it('risks the configured slice of equity whatever the stop width', () => {
     big();
     const eq = engine.accountEquity();
+    const pct = engine.riskPct();
     for (const slPips of [25, 60, 237]) {
       const loss = (engine.riskLots(slPips) / 0.1) * slPips; // $ at a stop-out
-      expect(Math.abs(loss - eq * 0.01) / (eq * 0.01)).toBeLessThan(0.02); // 0.01 rounding
+      expect(Math.abs(loss - eq * pct) / (eq * pct)).toBeLessThan(0.02); // 0.01 lot rounding
     }
+  });
+
+  it('sizes off the Risk Per Trade setting and clamps a wild one', () => {
+    big({ riskPerTrade: 1 });
+    expect(engine.riskPct()).toBe(0.01);
+    const atOne = engine.riskLots(50);
+    big({ riskPerTrade: 4 });
+    expect(engine.riskPct()).toBe(0.04);
+    expect(engine.riskLots(50)).toBeCloseTo(4 * atOne, 2);
+    big({ riskPerTrade: 400 });   // a mistyped percentage must not size the account away
+    expect(engine.riskPct()).toBe(0.1);
+    big({ riskPerTrade: 'nonsense' }); // dropped by the settings boundary, so the default stands
+    expect(engine.riskPct()).toBe(0.02);
   });
 
   it('shrinks the position as the stop widens', () => {
@@ -265,5 +281,99 @@ describe('bar close countdown', () => {
   it('hands a brand new bar the full period', () => {
     expect(barCloseIn('15m', 900000)).toBe(900000);
     expect(barCloseIn('1m', 0)).toBe(60000);
+  });
+});
+
+describe('simulated bars follow the wall clock', () => {
+  const bucket = (ms, stepSec) => Math.floor(ms / 1000 / stepSec) * stepSec;
+
+  it('never paints a bar ahead of the clock, and rolls on its own boundary', () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      const t0 = Date.parse('2026-10-12T10:00:30Z');
+      vi.setSystemTime(new Date(t0));
+      seedStorage({ pairs: ['XAU/USD'], defaultPair: 'XAU/USD', initialBalance: 100000 });
+      // Rebuild the state under the pinned clock: its seeded history was
+      // generated at import time, so an existing state carries real-world bars.
+      engine.applyUniverse([]);
+      engine.applyUniverse(['XAU/USD']);
+      engine.markAllTv(false); // drive the simulated walk, not the feed
+
+      // 40 ticks is ~5 simulated minutes: rolling every 8 ticks used to stamp
+      // bars a quarter of an hour into the future on every timeframe.
+      for (let i = 0; i < 40; i += 1) engine.tick();
+      for (const [tf, step] of [['1m', 60], ['15m', 900], ['1D', 86400]]) {
+        const arr = engine.getCandles('XAU/USD', tf);
+        expect(arr[arr.length - 1].time).toBe(bucket(t0, step));
+      }
+
+      vi.setSystemTime(new Date(t0 + 65_000)); // one minute boundary passed
+      for (let i = 0; i < 3; i += 1) engine.tick();
+      const m1 = engine.getCandles('XAU/USD', '1m');
+      expect(m1[m1.length - 1].time).toBe(bucket(t0 + 65_000, 60));
+      const m15 = engine.getCandles('XAU/USD', '15m');
+      expect(m15[m15.length - 1].time).toBe(bucket(t0, 900)); // 15m has not rolled yet
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe('archive rows and hostile listeners', () => {
+  it('turns NULL archive columns into values the pages can format', () => {
+    const n = engine.loadTrades([
+      { id: 'T-900', symbol: 'XAU/USD', side: 'BUY', status: 'open' },
+      { id: 'T-901', symbol: 'XAU/USD', side: 'SELL', status: 'closed' },
+    ]);
+    expect(n).toBe(2);
+    const open = engine.getTrades().find((t) => t.id === 'T-900');
+    const closed = engine.getTrades().find((t) => t.id === 'T-901');
+    expect(() => fmt(open.exit, 2)).not.toThrow();
+    expect(() => fmt(open.pnl, 2)).not.toThrow();
+    expect(open.closedAt).toBeNull();
+    expect(open.openTick).toBe(engine.tickCount); // an open trade gets a fresh window
+    expect(() => closed.exitReason.toUpperCase()).not.toThrow();
+    expect(engine.tradeStats().closedCount).toBe(
+      engine.getTrades().filter((t) => t.status === 'closed').length,
+    );
+  });
+
+  it('prices a close in the instrument\'s own pip even with no live state', () => {
+    expect(engine.pipFor('USD/JPY')).toBe(0.01);
+    expect(engine.pipFor('US100')).toBe(1);
+    expect(engine.pipFor('DOGE/USD')).toBe(0.00001);
+    const t = {
+      id: 'T-902', symbol: 'DOGE/USD', side: 'BUY', status: 'open',
+      entry: 0.08, exit: null, pips: null, pnl: null, lots: 0.1, closedAt: null,
+    };
+    engine.trades.push(t);
+    engine.closeTrade(t, 0.09, 'Manual');
+    // a 0.01 move is 1000 DOGE pips; the old 0.0001 guess booked it 100x smaller
+    expect(t.pips).toBeCloseTo(1000, 6);
+  });
+
+  it('keeps every other subscriber alive when one of them throws', () => {
+    let heard = 0;
+    const offBad = engine.subscribe(() => { throw new Error('a page broke mid-render'); });
+    const offGood = engine.subscribe(() => { heard += 1; });
+    engine.emit();
+    engine.emit();
+    offBad();
+    offGood();
+    expect(heard).toBe(2);
+  });
+
+  it('closes an open trade when its pair is switched off', () => {
+    seedStorage({ pairs: ['US100', 'XAU/USD'], defaultPair: 'XAU/USD', initialBalance: 100000 });
+    engine.applyUniverse(['US100', 'XAU/USD']);
+    engine.setTvLive('XAU/USD', true);
+    const t = engine.openTrade({ symbol: 'XAU/USD', side: 'BUY', slPips: 20, tpPips: 40 });
+    expect(t.status).toBe('open');
+    engine.applyUniverse(['US100']);
+    expect(engine.getState('XAU/USD')).toBeUndefined();
+    expect(t.status).toBe('closed');
+    expect(t.exitReason).toBe('Pair disabled');
+    expect(t.pips).toBe(0);
+    expect(engine.getTrades().filter((x) => x.status === 'open').length).toBe(0);
   });
 });

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { Component, useEffect, useState } from 'react';
 import { HashRouter, Route, Routes, useLocation } from 'react-router-dom';
 import Sidebar from './components/Sidebar';
 import TopBar from './components/TopBar';
@@ -30,6 +30,33 @@ const TITLES = {
   '/settings': { eyebrow: 'Configuration', title: 'Settings' },
 };
 
+// One broken page must not blank the terminal. Without this, any throw during a
+// render (a corrupt archived row, a half-written localStorage record) unmounts the
+// whole tree and the user sees an empty white window with no way back.
+class PageBoundary extends Component {
+  state = { error: null };
+
+  static getDerivedStateFromError(error) {
+    return { error };
+  }
+
+  render() {
+    if (!this.state.error) return this.props.children;
+    return (
+      <div className="page">
+        <section className="panel page-crash">
+          <b>This page could not be drawn</b>
+          <span>{String(this.state.error?.message ?? this.state.error)}</span>
+          <p>
+            The rest of the terminal still works — open another page, or reload if the
+            message came back. Settings → Reset preferences clears a bad saved value.
+          </p>
+        </section>
+      </div>
+    );
+  }
+}
+
 function Layout() {
   const [pairs, setPairs] = useState(() => engine.getSnapshot());
   const location = useLocation();
@@ -59,17 +86,20 @@ function Layout() {
       <Sidebar />
       <div className="main">
         <TopBar pairs={pairs} selected={selected} eyebrow={t.eyebrow} title={t.title} />
-        <Routes>
-          <Route path="/" element={<DashboardPage />} />
-          <Route path="/signals" element={<SignalsPage />} />
-          <Route path="/charts" element={<ChartsPage />} />
-          <Route path="/history" element={<HistoryPage />} />
-          <Route path="/news" element={<NewsPage />} />
-          <Route path="/strategies" element={<StrategiesPage />} />
-          <Route path="/portfolio" element={<PortfolioPage />} />
-          <Route path="/sessions" element={<SessionsPage />} />
-          <Route path="/settings" element={<SettingsPage />} />
-        </Routes>
+        {/* keyed by route so navigating away from a failed page clears its error */}
+        <PageBoundary key={location.pathname}>
+          <Routes>
+            <Route path="/" element={<DashboardPage />} />
+            <Route path="/signals" element={<SignalsPage />} />
+            <Route path="/charts" element={<ChartsPage />} />
+            <Route path="/history" element={<HistoryPage />} />
+            <Route path="/news" element={<NewsPage />} />
+            <Route path="/strategies" element={<StrategiesPage />} />
+            <Route path="/portfolio" element={<PortfolioPage />} />
+            <Route path="/sessions" element={<SessionsPage />} />
+            <Route path="/settings" element={<SettingsPage />} />
+          </Routes>
+        </PageBoundary>
       </div>
     </div>
   );

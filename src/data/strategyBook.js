@@ -69,7 +69,7 @@ export function allowedTimeframes(s) {
 // response or a legacy record can't leak undefined arrays into the UI.
 export function normalizeStrategy(s = {}) {
   const stamp = now();
-  return {
+  const base = {
     id: s.id || newId(),
     title: String(s.title || 'Untitled Strategy').trim(),
     pair: String(s.pair || 'EUR/USD'),
@@ -86,6 +86,9 @@ export function normalizeStrategy(s = {}) {
     createdAt: Number.isFinite(s.createdAt) ? s.createdAt : stamp,
     updatedAt: Number.isFinite(s.updatedAt) ? s.updatedAt : stamp,
   };
+  // Stored on the record so the engine can trade the book's own direction
+  // without importing this module (strategyBook already depends on the engine).
+  return { ...base, directions: bookDirections(base) };
 }
 
 // Read the library, importing a pre-library active strategy exactly once.

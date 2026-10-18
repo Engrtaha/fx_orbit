@@ -76,6 +76,11 @@ export default function PriceChart({ pair, symbol, tf, onTfChange, signal }) {
   const volRef = useRef(null);
   const emaRef = useRef(null);
   const emaLastRef = useRef(null);
+  // The series holds the DISPLAYED timeframe's bars; streaming into it before
+  // setData has run, or with a bar older than what it holds, makes
+  // lightweight-charts throw. Both are tracked here.
+  const drawnRef = useRef(false);
+  const lastBarTimeRef = useRef(0);
 
   // create chart once
   useEffect(() => {
@@ -175,6 +180,7 @@ export default function PriceChart({ pair, symbol, tf, onTfChange, signal }) {
     let cancelled = false;
     const cs = candleRef.current;
     if (!cs) return;
+    drawnRef.current = false;
     const settings = loadSettings();
     const backfill = settings.tvEnabled
       ? fetchTvHistory(settings.tvBackendUrl, symbol, tf).catch(() => 0)
@@ -183,7 +189,7 @@ export default function PriceChart({ pair, symbol, tf, onTfChange, signal }) {
     backfill.then(() => {
       if (cancelled) return;
       const data = engine.getCandles(symbol, tf);
-      const dec = engine.getState(symbol).decimals;
+      const dec = engine.getState(symbol)?.decimals ?? pair.decimals;
       const minMove = 10 ** -dec;
 
       cs.applyOptions({ priceFormat: { type: 'price', precision: dec, minMove } });
@@ -195,16 +201,24 @@ export default function PriceChart({ pair, symbol, tf, onTfChange, signal }) {
       emaLastRef.current = ema.length ? ema[ema.length - 1].value : null;
       emaRef.current.setData(ema);
       chartRef.current.timeScale().fitContent();
+      lastBarTimeRef.current = data.length ? data[data.length - 1].time : 0;
+      drawnRef.current = true;
     });
     return () => { cancelled = true; };
-  }, [symbol, tf]);
+  }, [symbol, tf, pair.decimals]);
 
   // stream live ticks into the active chart
   useEffect(() => {
     const unsub = engine.subscribe(() => {
-      const s = engine.getState(symbol);
-      if (!s) return;
-      const last = s.liveCandle;
+      if (!drawnRef.current) return;
+      // The 1m candle is NOT the bar this series holds. Streaming s.liveCandle
+      // into a 15m chart appended a bogus intraday bar and then, once the real
+      // 15m bar rolled, threw "Cannot update oldest data" — inside the engine's
+      // listener loop, which froze every other subscriber below it.
+      const bars = engine.getCandles(symbol, tf);
+      const last = bars[bars.length - 1];
+      if (!last || last.time < lastBarTimeRef.current) return;
+      lastBarTimeRef.current = last.time;
       candleRef.current?.update({
         time: last.time, open: last.open, high: last.high, low: last.low, close: last.close,
       });
@@ -218,7 +232,7 @@ export default function PriceChart({ pair, symbol, tf, onTfChange, signal }) {
       }
     });
     return unsub;
-  }, [symbol]);
+  }, [symbol, tf]);
 
   // active trade-signal levels: entry / SL / TP as dashed price lines with
   // axis labels, removed as soon as the signal closes or the pair switches
@@ -234,7 +248,12 @@ export default function PriceChart({ pair, symbol, tf, onTfChange, signal }) {
       lines.push(mk(signal.sl, 'rgba(251, 75, 106, 0.9)', 'SL'));
       lines.push(mk(signal.tp, 'rgba(45, 212, 167, 0.9)', 'TP'));
     }
-    return () => lines.forEach((l) => cs.removePriceLine(l));
+    // React runs cleanups in declaration order, so the chart effect above can
+    // destroy the chart before this one runs: removing a price line from a
+    // destroyed series throws exactly like the screenshot call does.
+    return () => lines.forEach((l) => {
+      try { cs.removePriceLine(l); } catch { /* chart already torn down */ }
+    });
   }, [signal, symbol]);
 
   return (

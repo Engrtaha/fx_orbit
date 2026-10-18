@@ -13,12 +13,13 @@ const TF_MINUTES = { '1m': 1, '5m': 5, '15m': 15, '1H': 60, '4H': 240, '1D': 144
 
 // closeTrade pays `pips * lots / 0.1`, so one lot is worth $10 per pip. A flat
 // 0.1 lot therefore turned a 237-point US100 stop into a $237 loss on a $126
-// account; sizing off the stop instead makes every stop-out cost RISK_PCT of
-// equity, which is what the strategy rules themselves ask for.
-export const RISK_PCT = 0.01;
+// account; sizing off the stop instead makes every stop-out cost the user's
+// Risk Per Trade setting of equity, whatever the instrument is.
 const MIN_LOTS = 0.01;
 const MAX_LOTS = 10;
 const PIP_VALUE_PER_LOT = 10;
+const EMA_FAST = 9;
+const EMA_SLOW = 21;
 
 // Bars are bucketed on epoch-aligned boundaries (see genHistory), so the wall
 // clock alone says when the running candle closes: 4H bars at 00/04/08… UTC
@@ -196,12 +197,24 @@ class MarketEngine {
       const def = this.defs.get(sym);
       if (def && !this.states.has(sym)) this.states.set(sym, this.createState(def));
     }
+    // Paint immediately: without this the first snapshot only arrives from
+    // tick() 900ms later, so a hard reload of #/charts renders nothing and
+    // #/signals shows a Generate button that silently does nothing.
+    this.emit();
     if (!this.timer) this.timer = setInterval(() => this.tick(), 900);
   }
   applyUniverse(symbols) {
     const next = new Set(symbols);
     for (const sym of [...this.states.keys()]) {
-      if (!next.has(sym)) this.states.delete(sym);
+      if (next.has(sym)) continue;
+      // Exits are only checked for live states, so an open trade left behind here
+      // could never hit its TP/SL or time stop. Close it at the last real price
+      // while its state — and therefore its pip size — is still available.
+      const s = this.states.get(sym);
+      for (const t of this.trades) {
+        if (t.status === 'open' && t.symbol === sym) this.closeTrade(t, s.mid, 'Pair disabled');
+      }
+      this.states.delete(sym);
     }
     for (const sym of next) {
       const def = this.defs.get(sym);
@@ -243,7 +256,8 @@ class MarketEngine {
 
   tick() {
     this.tickCount += 1;
-    const roll = this.tickCount % 8 === 0;
+    const cadence = this.tickCount % 8 === 0;
+    const nowSec = Math.floor(Date.now() / 1000);
     for (const s of this.states.values()) {
       if (s.tv) {
         // Price is driven by the TradingView feed; tick() only runs the
@@ -252,7 +266,7 @@ class MarketEngine {
         if (this.bookOpenFor(s)) {
           this.checkTradeExits(s);
           this.maybeAutoTrade(s);
-          if (roll) this.checkStrategies(s);
+          if (cadence) this.checkStrategies(s);
         }
         continue;
       }
@@ -266,9 +280,14 @@ class MarketEngine {
         if (next > last.high) last.high = next;
         if (next < last.low) last.low = next;
         last.volume += Math.round(2 + Math.random() * 14);
-        if (roll) {
+        // Bars roll on the wall clock, like the real feed and the countdown do.
+        // Adding a bar every 8 ticks advanced simulated time ~8x faster than the
+        // clock, so the chart painted bars minutes into the future.
+        const step = TF_MINUTES[tf] * 60;
+        const bucket = nowSec - (nowSec % step);
+        if (bucket > last.time) {
           arr.push({
-            time: last.time + TF_MINUTES[tf] * 60,
+            time: bucket,
             open: last.close,
             high: last.close * 1.00002,
             low: last.close * 0.99998,
@@ -290,7 +309,7 @@ class MarketEngine {
       if (this.bookOpenFor(s)) {
         this.checkTradeExits(s);
         this.maybeAutoTrade(s);
-        if (roll) this.checkStrategies(s);
+        if (cadence) this.checkStrategies(s);
       }
     }
     this.emit();
@@ -457,7 +476,12 @@ class MarketEngine {
 
   emit() {
     const snap = [...this.states.values()];
-    this.listeners.forEach((fn) => fn(snap, this.tickCount));
+    // One page failing must not stop the others from ever hearing about a price
+    // again: listeners run in subscription order, so an uncaught throw here
+    // silently freezes every surface below it — including the topbar.
+    this.listeners.forEach((fn) => {
+      try { fn(snap, this.tickCount); } catch { /* a broken subscriber stays broken, not fatal */ }
+    });
   }
 
   subscribe(fn) {
@@ -526,6 +550,11 @@ class MarketEngine {
   // ── Trade manager ──────────────────────────────────────────────────────────
   // The book starts empty and is restored from PostgreSQL on boot (see
   // src/data/persistence.js); there is no generated demo history.
+  //
+  // Every numeric column in trade_history is nullable — an open trade has no
+  // exit, pips, pnl or closed_at at all — and the pages format those fields
+  // directly, so a raw NULL would throw inside fmt() and blank the page.
+  // Coerce once, at the archive boundary.
   loadTrades(rows) {
     const incoming = (rows ?? []).filter((r) => r?.id && r.symbol && r.side && r.status);
     if (!incoming.length) return 0;
@@ -533,7 +562,16 @@ class MarketEngine {
     for (const r of incoming) {
       byId.set(r.id, {
         ...r,
-        lots: r.lots ?? 0.1,
+        lots: Number(r.lots) || 0.1,
+        entry: Number(r.entry) || 0,
+        sl: Number(r.sl) || 0,
+        tp: Number(r.tp) || 0,
+        exit: Number(r.exit) || 0,
+        pips: Number(r.pips) || 0,
+        pnl: Number(r.pnl) || 0,
+        openedAt: Number(r.openedAt) || 0,
+        closedAt: r.status === 'open' ? null : (Number(r.closedAt) || 0),
+        exitReason: r.exitReason ?? (r.status === 'open' ? null : 'Closed'),
         // A restored open trade must get a fresh time-stop window, not be
         // closed as "Time Stop" on the first tick after hydration.
         openTick: r.status === 'open' ? this.tickCount : 0,
@@ -582,23 +620,37 @@ class MarketEngine {
     return accountBalance(loadSettings(), this.realizedPnl());
   }
 
+  // Settings → "Risk Per Trade (%)" is the user's number; the clamp keeps a
+  // mistyped value (or a free-text 200) from sizing an account into one trade.
+  riskPct() {
+    const raw = Number(loadSettings().riskPerTrade);
+    return Math.min(10, Math.max(0.1, Number.isFinite(raw) ? raw : 1)) / 100;
+  }
+
   // A wide stop gets a smaller position, never a cheaper one. A blown account
   // trades the smallest unit until the user resets their anchor in Portfolio.
   riskLots(slPips) {
     const stop = Number(slPips);
     if (!Number.isFinite(stop) || stop <= 0) return MIN_LOTS;
-    const lots = (this.accountEquity() * RISK_PCT) / (stop * PIP_VALUE_PER_LOT);
+    const lots = (this.accountEquity() * this.riskPct()) / (stop * PIP_VALUE_PER_LOT);
     return Math.min(MAX_LOTS, Math.max(MIN_LOTS, +lots.toFixed(2)));
+  }
+
+  // Pip size for a symbol, straight from the universe catalog. The live state is
+  // not enough: a trade on a pair the user switched off has no state, and the
+  // old 0.0001 guess was 100x wrong for JPY crosses, 10000x for DOGE and 10x for
+  // US100 — it priced the P&L of every such close.
+  pipFor(symbol) {
+    return this.defs.get(symbol)?.pip ?? 0.0001;
   }
 
   closeTrade(t, exit, reason) {
     if (t.status !== 'open') return;
-    const s = this.states.get(t.symbol);
     t.status = 'closed';
     t.exit = exit;
     t.closedAt = Date.now();
     const dir = t.side === 'BUY' ? 1 : -1;
-    t.pips = +(((exit - t.entry) * dir) / (s ? s.pip : 0.0001)).toFixed(1);
+    t.pips = +(((exit - t.entry) * dir) / this.pipFor(t.symbol)).toFixed(1);
     t.pnl = +(t.pips * (t.lots / 0.1)).toFixed(2);
     t.exitReason = reason;
   }
@@ -653,40 +705,39 @@ class MarketEngine {
     }
   }
 
+  // An armed book trades the EMA cross on the instrument it names, in the
+  // direction(s) its own rules describe. Levels come from the same volatility
+  // math as every other fill: the 12/24-pip pair it used to read was dead config
+  // no UI can write, and on BTC/USD (pip = 1) a 12-pip stop is 0.015% of price —
+  // ordinary noise closed that trade within seconds.
   checkStrategies(s) {
     if (!this.strategies.length) return;
     const m1 = s.candlesByTf.get('1m');
+    if (!m1) return;
     const closes = m1.map((c) => c.close);
     if (closes.length < 30) return;
-    const hour = new Date().getUTCHours();
     for (const st of this.strategies) {
       if (!st.armed) continue;
       if (st.pair !== s.symbol) continue;
       if (this.strategyOpen.has(`${st.id}:${s.symbol}`)) continue;
 
-      const fast = emaSeries(closes, st.fastEma ?? 9);
-      const slow = emaSeries(closes, st.slowEma ?? 21);
+      const fast = emaSeries(closes, EMA_FAST);
+      const slow = emaSeries(closes, EMA_SLOW);
       const f0 = fast[fast.length - 2], f1 = fast[fast.length - 1];
       const w0 = slow[slow.length - 2], w1 = slow[slow.length - 1];
-      const crossUp = f0 <= w0 && f1 > w1;
-      const crossDown = f0 >= w0 && f1 < w1;
-      const wantLong = st.direction !== 'short';
-      const wantShort = st.direction !== 'long';
+      const dirs = st.directions ?? [];
+      const wantLong = !dirs.length || dirs.includes('bull');
+      const wantShort = !dirs.length || dirs.includes('bear');
 
       let side = null;
-      if (crossUp && wantLong) side = 'BUY';
-      else if (crossDown && wantShort) side = 'SELL';
+      if (f0 <= w0 && f1 > w1 && wantLong) side = 'BUY';
+      else if (f0 >= w0 && f1 < w1 && wantShort) side = 'SELL';
       if (!side) continue;
 
-      if (st.rsiFilter) {
-        const rsi = calcRsi(closes);
-        if (side === 'BUY' && rsi < (st.rsiMin ?? 40)) continue;
-        if (side === 'SELL' && rsi > (st.rsiMax ?? 60)) continue;
-      }
-      void hour;
+      const d = this.getDetail(s);
       const t = this.openTrade({
         symbol: s.symbol, side, source: 'Strategy', strategyId: st.id,
-        slPips: st.slPips ?? 12, tpPips: st.tpPips ?? 24,
+        slPips: Math.max(d.slPips, 3), tpPips: Math.max(d.tpPips, 5),
       });
       if (t) this.strategyOpen.set(`${st.id}:${s.symbol}`, t.id);
     }
