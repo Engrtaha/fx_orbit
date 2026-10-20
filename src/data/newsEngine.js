@@ -224,8 +224,10 @@ function marketContext() {
 // ── Desk heuristic (no AI key) ───────────────────────────────────────────────
 const HIGH_KEYS = ['RATE', 'INTEREST', 'FOMC', 'CPI', 'INFLATION', 'NFP', 'JOBS', 'UNEMPLOY', 'GDP', 'INTERVENTION', 'ELECTION', 'CENTRAL BANK'];
 const MED_KEYS = ['RETAIL', 'PPI', 'PMI', 'MANUFACTURING', 'TRADE', 'HOUSING', 'CONSUMER', 'CONFIDENCE', 'AUCTION', 'EMPLOYMENT', 'INDUSTRIAL'];
-const BULLISH_KEYS = ['BEAT', 'RAISE', 'RAISED', 'HIGHER', 'STRONG', 'STRENGTH', 'SURGE', 'GROWTH', 'EXPANSION', 'HIKE', 'TIGHTEN', 'OPTIMISTIC', 'RECORD', 'UPGRADE', 'GAIN', 'ROBUST', 'SOAR', 'RALL', 'CLIMB', 'RISE', 'RISING', 'ROSE', 'JUMP', 'HAWKISH', 'REBOUND', 'RECOVER'];
-const BEARISH_KEYS = ['MISS', 'MISSED', 'LOWER', 'WEAK', 'SLOW', 'CONTRACT', 'RECESSION', 'DOVISH', 'CUT', 'DOWNGRADE', 'FALL', 'FELL', 'SLUMP', 'PLUNGE', 'WEAKER', 'TUMBLE', 'DROP', 'SLIDE', 'SLID', 'SLIP', 'SINK', 'SANK', 'DECLINE', 'RETREAT', 'SOFTER', 'EASE', 'EASING', 'SELLOFF', 'SELL-OFF', 'CRASH'];
+// Word-start keys; a trailing $ means the whole word, so ROSE is not Rosengren
+// (a Fed official), MISS is not missile and FELL is not fellow.
+const BULLISH_KEYS = ['BEAT', 'RAISE', 'HIGHER', 'STRONG', 'STRENGTH', 'SURGE', 'GROWTH', 'EXPANSION', 'HIKE', 'TIGHTEN', 'OPTIMISTIC', 'RECORD', 'UPGRADE', 'GAIN', 'ROBUST', 'SOAR', 'RALL', 'CLIMB', 'RISE', 'RISING', 'ROSE$', 'JUMP', 'HAWKISH', 'REBOUND', 'RECOVER'];
+const BEARISH_KEYS = ['MISS$', 'MISSES$', 'MISSED$', 'LOWER', 'WEAK', 'SLOW', 'CONTRACT', 'RECESSION', 'DOVISH', 'CUT', 'DOWNGRADE', 'FALL', 'FELL$', 'SLUMP', 'PLUNGE', 'TUMBLE', 'DROP', 'SLIDE', 'SLID$', 'SLIP', 'SINK', 'SANK$', 'DECLINE', 'RETREAT', 'SOFTER', 'EASE', 'EASING', 'SELLOFF', 'SELL-OFF', 'CRASH'];
 
 // Releases where a HIGHER print is bad for the currency. Scoring them like CPI
 // called a jump in unemployment or jobless claims bullish.
@@ -240,10 +242,36 @@ const keywordImpact = (text) =>
 const keyRes = (keys) => keys.map((k) => new RegExp(`\\b${k}`));
 const HIGH_RE = keyRes(HIGH_KEYS);
 const MED_RE = keyRes(MED_KEYS);
-const BULLISH_RE = keyRes(BULLISH_KEYS);
-const BEARISH_RE = keyRes(BEARISH_KEYS);
-const countHits = (text, res) => res.reduce((n, re) => n + (re.test(text) ? 1 : 0), 0);
-const toneOf = (text) => countHits(text, BULLISH_RE) - countHits(text, BEARISH_RE);
+const wordIs = (word, keys) => keys.some((k) => (k.endsWith('$') ? word === k.slice(0, -1) : word.startsWith(k)));
+
+// Words that turn the next few words around: "fails to rally", "halts slide",
+// "pares gains", "no rate cut". Not "ends" — "stocks end higher" is no negation.
+const NEGATORS = /^(?:NOT|NO|NEVER|FAILS?|FAILED|UNABLE|HALTS?|HALTED|PARES?|PARED|ERASES?|ERASED|SNAPS?|SNAPPED)$/;
+const NEGATION_REACH = 3;
+// Extremes read as one call: "18-month lows" is bearish, "record high" bullish —
+// RECORD alone would otherwise score "record low" as bullish.
+const EXTREME = '(?:RECORD|ALL-TIME|MULTI-YEAR|FRESH|NEW|\\d+-(?:DAY|WEEK|MONTH|YEAR))';
+const BULL_PHRASE = new RegExp(`\\b${EXTREME}\\s+HIGHS?\\b`, 'g');
+const BEAR_PHRASE = new RegExp(`\\b${EXTREME}\\s+LOWS?\\b`, 'g');
+
+// Net tone of an UPPERCASE text: +1 per bullish word, -1 per bearish word, each
+// word counted once (WEAKER used to hit both WEAK and WEAKER).
+export function toneOf(text) {
+  const words = String(text)
+    .replace(BULL_PHRASE, ' ~BULL ')
+    .replace(BEAR_PHRASE, ' ~BEAR ')
+    .split(/[^A-Z0-9~'-]+/)
+    .filter(Boolean);
+  let score = 0;
+  let reach = -1;
+  words.forEach((w, i) => {
+    if (NEGATORS.test(w)) { reach = i + NEGATION_REACH; return; }
+    let v = w === '~BULL' ? 1 : w === '~BEAR' ? -1 : wordIs(w, BULLISH_KEYS) ? 1 : wordIs(w, BEARISH_KEYS) ? -1 : 0;
+    if (v && i <= reach) v = -v;
+    score += v;
+  });
+  return score;
+}
 
 // The verb next to the subject carries its tone: in "Gold falls as dollar
 // strengthens" FALL is gold's and STRENGTH is the dollar's. The title is cut at
@@ -453,12 +481,36 @@ function normalizeAnalysis(raw, item) {
   };
 }
 
+// Small local models often return "sentiment":"neutral" next to a summary that
+// says "This is bullish for CAD" (Llama 3.2 3B did exactly that on "CAD gains
+// against US Dollar"). A neutral field is reconciled before it is believed: the
+// direction the model's own summary states wins, else the desk's keyword read
+// when it has a clear edge. A model that commits to a direction is never
+// overridden.
+const STATED = /\b(bullish|bearish)\s+(?:for|on|towards?)\s+(?:the\s+)?([A-Z]{3,4}(?:\/[A-Z]{3})?)\b/i;
+export function reconcileNeutral(raw, item) {
+  const tone = String(raw?.sentiment ?? '').toLowerCase();
+  if (tone === 'bullish' || tone === 'bearish') return raw;
+  const stated = STATED.exec(String(raw?.summary ?? ''));
+  const unpinned = raw?.trade ? { ...raw.trade, side: '' } : raw?.trade;
+  if (stated) {
+    const target = stated[2].toUpperCase();
+    const subject = UNIVERSE.some((d) => d.symbol === target) ? { symbol: target } : { ccy: target };
+    return { ...raw, sentiment: stated[1].toLowerCase(), subject, trade: unpinned, reconciled: 'summary' };
+  }
+  const desk = deskAnalysis(item);
+  if (desk.sentiment !== 'neutral') {
+    return { ...raw, sentiment: desk.sentiment, subject: desk.subject, trade: unpinned, reconciled: 'desk' };
+  }
+  return raw;
+}
+
 export async function analyzeItem(item) {
   const settings = loadSettings();
   if (aiReady(settings)) {
     try {
-      const raw = await callAnalyst(settings, item, marketContext());
-      return { ...normalizeAnalysis(raw, item), simulated: false };
+      const raw = reconcileNeutral(await callAnalyst(settings, item, marketContext()), item);
+      return { ...normalizeAnalysis(raw, item), simulated: false, reconciled: raw.reconciled ?? null };
     } catch (err) {
       return { ...normalizeAnalysis(deskAnalysis(item), item), simulated: true, aiError: aiErrorText(settings, err) };
     }
@@ -503,13 +555,12 @@ export function closeNewsTrade(id) {
 
 export function tradeLive(t) {
   const s = engine.getState(t.symbol);
-  const dir = t.side === 'BUY' ? 1 : -1;
   const mark = s ? s.mid : (t.exit || t.entry);
-  // pipFor reads the universe catalog, not the live state: a trade on a pair that
-  // is no longer enabled still has to be priced in its own pip, and the old
-  // 0.0001 guess was 100x wrong for JPY crosses and 10000x for DOGE.
-  const pips = ((mark - t.entry) * dir) / engine.pipFor(t.symbol);
-  return { pips: +pips.toFixed(1), pnl: +(pips * (t.lots / 0.1)).toFixed(2) };
+  // Priced in the instrument's own pip and contract (engine.pnlAt): the old
+  // 0.0001 guess was 100x wrong for JPY crosses and 10000x for DOGE, and a flat
+  // $10/pip was 10x off for an index.
+  const { pips, pnl } = engine.pnlAt(t, mark);
+  return { pips: +pips.toFixed(1), pnl: +pnl.toFixed(2) };
 }
 
 // High-impact news published AFTER a news trade opened that points the other way

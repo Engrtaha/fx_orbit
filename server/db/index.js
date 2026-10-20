@@ -65,6 +65,10 @@ CREATE TABLE IF NOT EXISTS trade_history (
 );
 CREATE INDEX IF NOT EXISTS trade_history_opened_idx ON trade_history (opened_at DESC);
 CREATE INDEX IF NOT EXISTS trade_history_status_idx ON trade_history (status);
+-- Added after the first release: how long the trade may stay open (time stop).
+-- ADD COLUMN IF NOT EXISTS upgrades an existing archive — and a database seeded
+-- from an older snapshot — in place.
+ALTER TABLE trade_history ADD COLUMN IF NOT EXISTS max_hold_ms BIGINT;
 
 CREATE TABLE IF NOT EXISTS news_items (
   id         TEXT PRIMARY KEY,

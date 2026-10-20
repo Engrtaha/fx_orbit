@@ -29,11 +29,28 @@ const asText = (v) => {
   return String(v);
 };
 
+// ── Explicit fields ──────────────────────────────────────────────────────────
+// A strategy record carries `rr`, `holdHours` and `setup` as fields the user
+// edits. When a record HAS the field it is the answer — null included, meaning
+// "use the engine default" — and the rule text is only read for records saved
+// before the fields existed (normalizeStrategy fills them in once).
+const has = (v, key) => !!v && typeof v === 'object' && !Array.isArray(v) && Object.hasOwn(v, key);
+export const validRr = (v) => {
+  const n = Number(v);
+  return v != null && v !== '' && Number.isFinite(n) && n >= MIN_RR && n <= MAX_RR ? n : null;
+};
+export const validHoldHours = (v) => {
+  const n = Number(v);
+  return v != null && v !== '' && Number.isFinite(n) && n > 0 && n <= 720 ? n : null;
+};
+export const SETUPS = ['reversal', 'trend'];
+
 // The book's final target: a plan that scales out ("partial at 1:2, runner to
 // 1:4.5") is aiming for the largest ratio it names. Accepts a strategy record,
 // the Signals page's { name, rules } payload or plain rule text. Returns null
 // when nothing is named, so callers keep their own default.
 export function strategyRewardRisk(strategy) {
+  if (has(strategy, 'rr')) return validRr(strategy.rr);
   const lines = asText(strategy).split(/\n|(?<=[.;])\s+/);
   let best = null;
   const take = (raw) => {
@@ -61,6 +78,10 @@ const HOLD_SPAN = /\b(?:hold(?:ing)?(?: time| period)?(?: of| for)?|after|within
 const UNIT_MS = { m: 60e3, h: 3600e3, d: 86400e3, s: 8 * 3600e3 };
 
 export function strategyMaxHoldMs(strategy) {
+  if (has(strategy, 'holdHours')) {
+    const h = validHoldHours(strategy.holdHours);
+    return h == null ? null : h * 3600e3;
+  }
   let best = null;
   for (const line of asText(strategy).split(/\n|(?<=[.;])\s+/)) {
     if (!HOLD_CONTEXT.test(line)) continue;
@@ -75,6 +96,25 @@ export function strategyMaxHoldMs(strategy) {
 }
 
 // A book that trades tops and bottoms. A pure trend-following book is not one:
-// it only hears about a reversal as a reason, never trades into it.
-const REVERSAL_BOOK = /revers|sweep|liquidity|stop[\s-]?run|fade|mean[\s-]?reversion|exhaust|overbought|oversold|counter[\s-]?trend/i;
-export const isReversalBook = (strategy) => REVERSAL_BOOK.test(asText(strategy));
+// it only hears about a reversal as a reason, never trades into it. Plain
+// "liquidity" is not a tell — trend books talk about "session liquidity" too.
+const REVERSAL_BOOK = /revers|sweep|stop[\s-]?run|liquidity\s+(?:grab|raid|hunt)|fade|mean[\s-]?reversion|exhaust|overbought|oversold|counter[\s-]?trend/i;
+export const isReversalBook = (strategy) => {
+  if (has(strategy, 'setup') && SETUPS.includes(strategy.setup)) return strategy.setup === 'reversal';
+  return REVERSAL_BOOK.test(asText(strategy));
+};
+
+// What the rule TEXT says, ignoring any explicit fields — how a record saved
+// before the fields existed gets them. The setup reads only the title and entry
+// rules: the analysis narrates context ("the opposite liquidity pool") and the
+// risk rules describe exits, neither says what the book enters on.
+export function fieldsFromText(s) {
+  const text = { analysis: s?.analysis, entryRules: s?.entryRules, riskRules: s?.riskRules };
+  const hold = strategyMaxHoldMs(text);
+  return {
+    rr: strategyRewardRisk(text),
+    holdHours: hold == null ? null : +(hold / 3600e3).toFixed(2),
+    setup: REVERSAL_BOOK.test([s?.title, ...(Array.isArray(s?.entryRules) ? s.entryRules : [s?.entryRules])].join('\n'))
+      ? 'reversal' : 'trend',
+  };
+}

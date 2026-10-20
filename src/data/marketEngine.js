@@ -4,7 +4,7 @@
 // levels so the terminal feels alive without an API key.
 
 import {
-  accountBalance, inAccount, loadSettings, saveSettings, UNIVERSE, loadStrategies,
+  accountBalance, contractSize, inAccount, loadSettings, saveSettings, UNIVERSE, loadStrategies,
 } from './settings';
 import { isReversalBook, strategyMaxHoldMs, strategyRewardRisk } from '../utils/riskReward';
 
@@ -12,17 +12,23 @@ export const TIMEFRAMES = ['1m', '5m', '15m', '1H', '4H', '1D'];
 
 const TF_MINUTES = { '1m': 1, '5m': 5, '15m': 15, '1H': 60, '4H': 240, '1D': 1440 };
 
-// closeTrade pays `pips * lots / 0.1`, so one lot is worth $10 per pip. A flat
-// 0.1 lot therefore turned a 237-point US100 stop into a $237 loss on a $126
-// account; sizing off the stop instead makes every stop-out cost the user's
-// Risk Per Trade setting of equity, whatever the instrument is.
+// closeTrade pays `pips * lots * pipValueUsd(symbol)`. A flat 0.1 lot at the old
+// universal $10/pip turned a 237-point US100 stop into a $237 loss on a $126
+// account; sizing off the stop and the instrument's own pip value instead makes
+// every stop-out cost the user's Risk Per Trade setting of equity.
 // The floor is fractional on purpose: at 0.01 lot ($0.10/pip) a $126 account
 // risking 2% ($2.52) was overridden by any stop wider than 25 pips, and a
 // BTC/USD volatility stop is several hundred — one trade lost $50–80 and one
 // target paid $200, the "best trade" of an account that should risk $2.52.
 const MIN_LOTS = 0.000001;
+// Only for a size asked without an instrument (no contract to read): the old
+// flat $10/pip model and its 10-lot ceiling.
 const MAX_LOTS = 10;
 const PIP_VALUE_PER_LOT = 10;
+// With an instrument, the ceiling is exposure, not a lot count — 10 lots is
+// $1M of EUR/USD but 10 DOGE. A paper-thin stop may not lever the account past
+// this multiple of equity, whatever the risk maths asks for.
+const MAX_LEVERAGE = 30;
 const EMA_FAST = 9;
 const EMA_SLOW = 21;
 
@@ -639,6 +645,7 @@ class MarketEngine {
         pnl: Number(r.pnl) || 0,
         openedAt: Number(r.openedAt) || 0,
         closedAt: r.status === 'open' ? null : (Number(r.closedAt) || 0),
+        maxHoldMs: Number(r.maxHoldMs) > 0 ? Number(r.maxHoldMs) : null,
         exitReason: r.exitReason ?? (r.status === 'open' ? null : 'Closed'),
         // A restored open trade must get a fresh time-stop window, not be
         // closed as "Time Stop" on the first tick after hydration.
@@ -668,7 +675,7 @@ class MarketEngine {
     const tp = entry + dir * tpPips * s.pip;
     const trade = {
       id: `T-${String(++this.tradeSeq).padStart(3, '0')}`,
-      symbol, side, lots: this.riskLots(slPips), entry, sl, tp,
+      symbol, side, lots: this.riskLots(slPips, symbol), entry, sl, tp,
       openedAt: Date.now(), openTick: this.tickCount,
       source, strategyId, status: 'open', note,
       maxHoldMs: Number(maxHoldMs) > 0 ? Number(maxHoldMs) : null,
@@ -703,10 +710,20 @@ class MarketEngine {
 
   // A wide stop gets a smaller position, never a cheaper one. A blown account
   // trades the smallest unit until the user resets their anchor in Portfolio.
-  riskLots(slPips) {
+  riskLots(slPips, symbol = null) {
     const stop = Number(slPips);
     if (!Number.isFinite(stop) || stop <= 0) return MIN_LOTS;
-    const lots = (this.accountEquity() * this.riskPct()) / (stop * PIP_VALUE_PER_LOT);
+    const def = symbol ? this.defs.get(symbol) : null;
+    const equity = this.accountEquity();
+    if (def) {
+      const pipValue = this.pipValueUsd(symbol);
+      let lots = (equity * this.riskPct()) / (stop * pipValue);
+      const price = this.states.get(symbol)?.mid || def.price;
+      const notionalPerLot = contractSize(def) * price * this.quoteToUsd(def.quote);
+      if (notionalPerLot > 0 && equity > 0) lots = Math.min(lots, (equity * MAX_LEVERAGE) / notionalPerLot);
+      return Math.max(MIN_LOTS, Math.floor(lots * 1e6) / 1e6);
+    }
+    const lots = (equity * this.riskPct()) / (stop * PIP_VALUE_PER_LOT);
     // Rounded DOWN: rounding to nearest sized some stops a couple of percent
     // over the user's risk.
     return Math.min(MAX_LOTS, Math.max(MIN_LOTS, Math.floor(lots * 1e6) / 1e6));
@@ -720,14 +737,47 @@ class MarketEngine {
     return this.defs.get(symbol)?.pip ?? 0.0001;
   }
 
+  // USD per unit of a quote currency: the live cross when the feed has it, else
+  // the catalog anchor (close enough for converting a pip, never a fill price).
+  quoteToUsd(quote) {
+    const q = String(quote ?? 'USD').toUpperCase();
+    if (q === 'USD') return 1;
+    const priceOf = (sym) => {
+      const s = this.states.get(sym);
+      if (s?.tv && s.mid > 0) return s.mid;
+      return this.defs.get(sym)?.price ?? null;
+    };
+    const direct = priceOf(`${q}/USD`);
+    if (direct) return direct;
+    const inverse = priceOf(`USD/${q}`);
+    return inverse ? 1 / inverse : 1;
+  }
+
+  // What one pip of one lot is worth in USD. Every instrument used to count $10
+  // — right for EUR/USD and gold, but 10x off for US100 ($1/point per CFD lot)
+  // and meaningless for a coin. Sizing and P&L both use this, so a stop-out
+  // still costs exactly Risk Per Trade.
+  pipValueUsd(symbol) {
+    const def = this.defs.get(symbol);
+    if (!def) return PIP_VALUE_PER_LOT;
+    return contractSize(def) * def.pip * this.quoteToUsd(def.quote);
+  }
+
+  // USD P&L of a trade at a given price (realized at close, floating while open).
+  pnlAt(t, price) {
+    const dir = t.side === 'BUY' ? 1 : -1;
+    const pips = ((price - t.entry) * dir) / this.pipFor(t.symbol);
+    return { pips, pnl: pips * (Number(t.lots) || 0) * this.pipValueUsd(t.symbol) };
+  }
+
   closeTrade(t, exit, reason) {
     if (t.status !== 'open') return;
     t.status = 'closed';
     t.exit = exit;
     t.closedAt = Date.now();
-    const dir = t.side === 'BUY' ? 1 : -1;
-    t.pips = +(((exit - t.entry) * dir) / this.pipFor(t.symbol)).toFixed(1);
-    t.pnl = +(t.pips * (t.lots / 0.1)).toFixed(2);
+    const { pips, pnl } = this.pnlAt(t, exit);
+    t.pips = +pips.toFixed(1);
+    t.pnl = +pnl.toFixed(2);
     t.exitReason = reason;
   }
 
@@ -743,10 +793,10 @@ class MarketEngine {
     }
   }
 
-  // The trade's own hold time, else its strategy's rule, else the source default.
-  // A trade restored from the archive has no maxHoldMs column, so it falls
-  // back the same way — and keeps its real opening time, so one that overstayed
-  // while the app was closed is time-stopped at the first live price.
+  // The trade's own hold time (stored with it, archive included), else its
+  // strategy's, else the default. A restored trade keeps its real opening time,
+  // so one that overstayed while the app was closed is time-stopped at the
+  // first live price.
   holdFor(t) {
     if (Number(t.maxHoldMs) > 0) return Number(t.maxHoldMs);
     if (t.strategyId) {
@@ -961,3 +1011,66 @@ export function latestReversal(candles, price, within = 3) {
 export const reversalLabel = (r) => (r
   ? `${r.side === 'SHORT' ? 'Bearish' : 'Bullish'} ${r.kind === 'sweep' ? 'liquidity-sweep' : 'RSI-exhaustion'} reversal`
   : '');
+
+// ── Reversal backtest ────────────────────────────────────────────────────────
+// Replays every reversal on CLOSED bars the way the engine trades it: entry at
+// the reversal bar's close, stop beyond the swept extreme (+0.25 ATR, at least
+// 0.5 ATR), target at `rr` times the stop, closed at market after `maxBars`.
+// Pessimistic by construction — a bar that touches both levels is a loss — and
+// one position at a time, like an armed book. Trades whose window runs past the
+// data are left out rather than guessed. The detector's thresholds are NOT
+// tuned against this: fitting them to a few hundred bars would fit noise.
+function atrAt(candles, i, n = 14) {
+  if (i < n) return null;
+  let sum = 0;
+  for (let k = i - n + 1; k <= i; k++) {
+    const c = candles[k];
+    const p = candles[k - 1];
+    sum += Math.max(c.high - c.low, Math.abs(c.high - p.close), Math.abs(c.low - p.close));
+  }
+  return sum / n;
+}
+
+export function backtestReversals(candles, { rr = 2.5, maxBars = 16, lookback = REVERSAL_LOOKBACK } = {}) {
+  const closed = (candles ?? []).slice(0, -1); // the last bar is still forming
+  const trades = [];
+  let busyUntil = -1;
+  for (let i = 0; i < closed.length - 1; i++) {
+    if (i <= busyUntil) continue;
+    const r = reversalAt(closed, i, lookback);
+    const atr = r ? atrAt(closed, i) : null;
+    if (!r || !(atr > 0)) continue;
+    const dir = r.side === 'LONG' ? 1 : -1;
+    const entry = closed[i].close;
+    const beyond = r.side === 'SHORT' ? r.extreme - entry : entry - r.extreme;
+    const risk = Math.max(beyond + 0.25 * atr, 0.5 * atr);
+    const sl = entry - dir * risk;
+    const tp = entry + dir * risk * rr;
+    const last = i + maxBars;
+    let R = null;
+    let exit = last;
+    for (let j = i + 1; j <= Math.min(last, closed.length - 1); j++) {
+      const c = closed[j];
+      if (dir > 0 ? c.low <= sl : c.high >= sl) { R = -1; exit = j; break; }
+      if (dir > 0 ? c.high >= tp : c.low <= tp) { R = rr; exit = j; break; }
+    }
+    if (R == null) {
+      if (last > closed.length - 1) break; // window not over yet — unknown, not a loss
+      R = ((closed[last].close - entry) * dir) / risk;
+    }
+    trades.push({ time: r.time, side: r.side, kind: r.kind, R, outcome: R === rr ? 'tp' : R === -1 ? 'sl' : 'time' });
+    busyUntil = exit;
+  }
+  const totalR = trades.reduce((a, t) => a + t.R, 0);
+  const wins = trades.filter((t) => t.R > 0).length;
+  return {
+    trades,
+    count: trades.length,
+    wins,
+    winRate: trades.length ? wins / trades.length : 0,
+    avgR: trades.length ? totalR / trades.length : 0,
+    totalR,
+    rr,
+    maxBars,
+  };
+}

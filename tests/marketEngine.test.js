@@ -72,7 +72,7 @@ describe('trade lifecycle', () => {
     expect(t.status).toBe('closed');
     expect(t.exitReason).toBe('TP Hit');
     expect(t.pips).toBe(20);
-    expect(t.pnl).toBeCloseTo(t.pips * (t.lots / 0.1), 6);
+    expect(t.pnl).toBeCloseTo(t.pips * t.lots * engine.pipValueUsd('XAU/USD'), 2); // booked in cents
   });
 
   it('closes SELL trades at stop loss with negative pips', () => {
@@ -607,5 +607,71 @@ describe('momentum score', () => {
       s.candlesByTf.set('1m', saved);
       engine.refreshIndicators(s);
     }
+  });
+});
+
+describe('per-instrument pip value', () => {
+  it('prices a pip from the contract and the quote currency', () => {
+    expect(engine.pipValueUsd('EUR/USD')).toBeCloseTo(10, 9);   // 100,000 × 0.0001
+    expect(engine.pipValueUsd('XAU/USD')).toBeCloseTo(10, 9);   // 100 oz × 0.1
+    expect(engine.pipValueUsd('XAG/USD')).toBeCloseTo(50, 9);   // 5,000 oz × 0.01
+    expect(engine.pipValueUsd('US100')).toBe(1);                // $1 per point per CFD lot
+    expect(engine.pipValueUsd('BTC/USD')).toBe(1);              // 1 coin × $1
+    expect(engine.pipValueUsd('AAPL')).toBeCloseTo(1, 9);       // 100 shares × $0.01
+    const jpy = engine.pipValueUsd('USD/JPY');                  // 1,000 JPY → USD
+    expect(jpy).toBeGreaterThan(5);
+    expect(jpy).toBeLessThan(9);
+    expect(engine.pipValueUsd('GER40')).toBeGreaterThan(1);     // 1 EUR per point
+  });
+
+  it('risks the same dollars on an index as on gold', () => {
+    seedStorage({ pairs: ['US100', 'XAU/USD'], defaultPair: 'XAU/USD', initialBalance: 126, riskPerTrade: 2 });
+    engine.markAllTv(true);
+    const risk = engine.accountEquity() * 0.02;
+    for (const [symbol, slPips] of [['US100', 238], ['XAU/USD', 112]]) {
+      const t = engine.openTrade({ symbol, side: 'BUY', slPips, tpPips: slPips * 4.5 });
+      engine.closeTrade(t, t.sl, 'SL Hit');
+      expect(-t.pnl).toBeLessThanOrEqual(risk + 0.01);
+      expect(-t.pnl).toBeGreaterThan(risk * 0.95);
+    }
+  });
+
+  it('caps a paper-thin stop by exposure, not by a lot count', () => {
+    seedStorage({ pairs: ['US100', 'XAU/USD'], defaultPair: 'XAU/USD', initialBalance: 1000, riskPerTrade: 2 });
+    const s = engine.getState('XAU/USD');
+    const lots = engine.riskLots(0.5, 'XAU/USD'); // a 0.5-pip stop would ask for 4 lots of gold
+    const notional = lots * 100 * s.mid;
+    expect(notional).toBeLessThanOrEqual(engine.accountEquity() * 30 + 1);
+  });
+});
+
+describe('reversal backtest', () => {
+  const range = (n, t0 = 0) => Array.from({ length: n }, (_, i) => ({
+    time: t0 + i * 60, open: 100.4, high: 101, low: 100, close: 100.6,
+  }));
+  const sweepHigh = (t) => ({ time: t, open: 100.8, high: 102, low: 100.1, close: 100.2 });
+
+  it('books a target hit at +rr and a stop at -1R, pessimistically', async () => {
+    const { backtestReversals } = await import('../src/data/marketEngine.js');
+    // Short after the sweep, then price falls far: target.
+    const win = [...range(25), sweepHigh(25 * 60)];
+    for (let k = 1; k <= 20; k++) win.push({ time: (25 + k) * 60, open: 100.2 - k * 0.3, high: 100.3 - k * 0.3, low: 99.9 - k * 0.3, close: 100 - k * 0.3 });
+    const w = backtestReversals(win, { rr: 2, maxBars: 16 });
+    expect(w.trades[0]).toMatchObject({ side: 'SHORT', outcome: 'tp', R: 2 });
+
+    // Same sweep, then one bar spanning both levels: counted as the stop.
+    const both = [...range(25), sweepHigh(25 * 60), { time: 26 * 60, open: 100.2, high: 110, low: 90, close: 100 }, ...range(20, 27 * 60)];
+    expect(backtestReversals(both, { rr: 2 }).trades[0]).toMatchObject({ outcome: 'sl', R: -1 });
+  });
+
+  it('closes at market after the hold and leaves an unfinished window out', async () => {
+    const { backtestReversals } = await import('../src/data/marketEngine.js');
+    const flatAfter = [...range(25), sweepHigh(25 * 60), ...range(30, 26 * 60)];
+    const t = backtestReversals(flatAfter, { rr: 4.5, maxBars: 5 }).trades[0];
+    expect(t.outcome).toBe('time');
+    expect(t.R).toBeGreaterThan(-1);
+    expect(t.R).toBeLessThan(4.5);
+    const short = [...range(25), sweepHigh(25 * 60), ...range(3, 26 * 60)];
+    expect(backtestReversals(short, { maxBars: 16 }).count).toBe(0);
   });
 });

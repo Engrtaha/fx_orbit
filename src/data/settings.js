@@ -40,8 +40,8 @@ export const UNIVERSE = [
   { symbol: 'USD/DKK', base: 'USD', quote: 'DKK', price: 6.86421, decimals: 4, vol: 0.00022, spread: 30,  pip: 0.0001, group: 'Exotic' },
   { symbol: 'USD/PLN', base: 'USD', quote: 'PLN', price: 3.94721, decimals: 4, vol: 0.0008,  spread: 45,  pip: 0.0001, group: 'Exotic' },
   // Metals
-  { symbol: 'XAU/USD', base: 'XAU', quote: 'USD', price: 2384.55, decimals: 2, vol: 0.0008, spread: 2.4, pip: 0.1,    group: 'Metal' },
-  { symbol: 'XAG/USD', base: 'XAG', quote: 'USD', price: 28.423,  decimals: 3, vol: 0.001,  spread: 2.8, pip: 0.01,   group: 'Metal' },
+  { symbol: 'XAU/USD', base: 'XAU', quote: 'USD', price: 2384.55, decimals: 2, vol: 0.0008, spread: 2.4, pip: 0.1,    group: 'Metal', contract: 100 },
+  { symbol: 'XAG/USD', base: 'XAG', quote: 'USD', price: 28.423,  decimals: 3, vol: 0.001,  spread: 2.8, pip: 0.01,   group: 'Metal', contract: 5000 },
   // Indices
   { symbol: 'US100',   base: 'NQ',  quote: 'USD', price: 19847.5, decimals: 1, vol: 0.0011, spread: 2.5, pip: 1, group: 'Index' },
   { symbol: 'US500',   base: 'ES',  quote: 'USD', price: 5943.2,  decimals: 1, vol: 0.0008, spread: 1.8, pip: 1, group: 'Index' },
@@ -70,6 +70,15 @@ export const UNIVERSE = [
   { symbol: 'DOGE/USD', base: 'DOGE', quote: 'USD', price: 0.0803, decimals: 5, vol: 0.0022, spread: 20, pip: 0.00001, group: 'Crypto', alwaysOpen: true },
   { symbol: 'ADA/USD',  base: 'ADA',  quote: 'USD', price: 0.2229, decimals: 4, vol: 0.0018, spread: 12, pip: 0.00005, group: 'Crypto', alwaysOpen: true },
 ];
+
+// Units of the instrument in one lot — what turns a pip into money. Standard
+// broker specs: an FX lot is 100,000 of the base currency, gold 100 oz, silver
+// 5,000 oz, an index CFD 1 per point, a stock lot 100 shares, a crypto lot 1
+// coin. A row's own `contract` wins over its group's.
+const CONTRACT_BY_GROUP = {
+  Major: 100_000, Cross: 100_000, Exotic: 100_000, Metal: 100, Index: 1, Stock: 100, Crypto: 1,
+};
+export const contractSize = (def) => def?.contract ?? CONTRACT_BY_GROUP[def?.group] ?? 100_000;
 
 export const DEFAULT_ENABLED = [
   'EUR/USD', 'GBP/USD', 'USD/JPY', 'USD/CHF', 'AUD/USD', 'USD/CAD',

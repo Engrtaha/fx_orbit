@@ -39,9 +39,9 @@ describe('trade row mapper', () => {
     openedAt: 1760000000000, closedAt: 1760000001000,
   };
 
-  it('maps the camelCase engine trade onto the 17 columns', () => {
+  it('maps the camelCase engine trade onto the 18 columns', () => {
     const row = tradeRow(trade);
-    expect(row).toHaveLength(17);
+    expect(row).toHaveLength(18);
     expect(row[0]).toBe('T-007');
     expect(row[4]).toBe('News AI');
     expect(row[15]).toBe(1760000000000); // opened_at as BIGINT
@@ -68,5 +68,16 @@ describe('trade row mapper', () => {
     expect(back.exitReason).toBe('TP Hit');
     expect(back.strategyId).toBeNull();
     expect(back.openTick).toBeUndefined(); // recomputed by engine.loadTrades
+  });
+});
+
+describe('trade hold time column', () => {
+  it('round-trips max_hold_ms and leaves it NULL when unset', async () => {
+    const { tradeRow, tradeShape } = await import('../server/db/tradeHistory.js');
+    const row = tradeRow({ id: 'T-1', symbol: 'XAU/USD', side: 'BUY', status: 'open', maxHoldMs: 6 * 3600e3 });
+    expect(row[row.length - 1]).toBe(21600000);
+    expect(tradeRow({ id: 'T-2', symbol: 'XAU/USD', side: 'BUY', status: 'open' }).at(-1)).toBeNull();
+    expect(tradeShape({ id: 'T-1', max_hold_ms: '21600000' }).maxHoldMs).toBe(21600000); // int8 arrives as text
+    expect(tradeShape({ id: 'T-2', max_hold_ms: null }).maxHoldMs).toBeNull();
   });
 });

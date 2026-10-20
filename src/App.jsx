@@ -1,16 +1,20 @@
-import { Component, useEffect, useState } from 'react';
+import { Component, Suspense, lazy, useEffect, useState } from 'react';
 import { HashRouter, Route, Routes, useLocation } from 'react-router-dom';
 import Sidebar from './components/Sidebar';
 import TopBar from './components/TopBar';
-import DashboardPage from './pages/DashboardPage';
-import SignalsPage from './pages/SignalsPage';
-import ChartsPage from './pages/ChartsPage';
-import HistoryPage from './pages/HistoryPage';
-import NewsPage from './pages/NewsPage';
-import StrategiesPage from './pages/StrategiesPage';
-import PortfolioPage from './pages/PortfolioPage';
-import SessionsPage from './pages/SessionsPage';
-import SettingsPage from './pages/SettingsPage';
+
+// Each page is its own chunk, loaded when first opened: the charting library
+// only ships with the pages that draw charts, and the first paint no longer
+// waits for all nine pages (the single bundle was ~650 kB).
+const DashboardPage = lazy(() => import('./pages/DashboardPage'));
+const SignalsPage = lazy(() => import('./pages/SignalsPage'));
+const ChartsPage = lazy(() => import('./pages/ChartsPage'));
+const HistoryPage = lazy(() => import('./pages/HistoryPage'));
+const NewsPage = lazy(() => import('./pages/NewsPage'));
+const StrategiesPage = lazy(() => import('./pages/StrategiesPage'));
+const PortfolioPage = lazy(() => import('./pages/PortfolioPage'));
+const SessionsPage = lazy(() => import('./pages/SessionsPage'));
+const SettingsPage = lazy(() => import('./pages/SettingsPage'));
 import { engine } from './data/marketEngine';
 import { loadSettings, subscribeSettings } from './data/settings';
 import { loadLibrary } from './data/strategyBook';
@@ -88,6 +92,7 @@ function Layout() {
         <TopBar pairs={pairs} selected={selected} eyebrow={t.eyebrow} title={t.title} />
         {/* keyed by route so navigating away from a failed page clears its error */}
         <PageBoundary key={location.pathname}>
+          <Suspense fallback={<div className="page"><p className="dim empty">Loading…</p></div>}>
           <Routes>
             <Route path="/" element={<DashboardPage />} />
             <Route path="/signals" element={<SignalsPage />} />
@@ -99,6 +104,7 @@ function Layout() {
             <Route path="/sessions" element={<SessionsPage />} />
             <Route path="/settings" element={<SettingsPage />} />
           </Routes>
+          </Suspense>
         </PageBoundary>
       </div>
     </div>

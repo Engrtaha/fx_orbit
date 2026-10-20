@@ -4,14 +4,16 @@
 // own engine math produces the same shape, so the page stays usable offline.
 
 import {
-  engine, latestReversal, reversalLabel, symbolMarketClosed, volatilityPips,
+  engine, latestReversal, reversalLabel, symbolMarketClosed, tfPeriodMs, volatilityPips,
 } from './marketEngine';
 import { loadSettings } from './settings';
 import {
   parseJsonLoose, aiReady, aiAuthHeaders, aiErrorText, aiModelOf, aiJsonMode, chatEndpoint,
 } from '../utils/ai';
 import { fetchJson, AI_TIMEOUT_MS } from '../utils/http';
-import { isReversalBook, strategyRewardRisk } from '../utils/riskReward';
+import {
+  SETUPS, isReversalBook, strategyMaxHoldMs, strategyRewardRisk,
+} from '../utils/riskReward';
 
 const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
 const num = (v) => { const n = Number(v); return Number.isFinite(n) ? n : null; };
@@ -40,7 +42,10 @@ const strategyText = (strategy) => (typeof strategy === 'string' ? strategy : st
 
 // A book that trades tops and bottoms — or no book at all — acts on a fresh
 // reversal. A pure trend-following book only hears about it as a reason.
-export const actsOnReversal = (strategy) => !strategyText(strategy) || isReversalBook(strategyText(strategy));
+export const actsOnReversal = (strategy) => {
+  if (strategy && typeof strategy === 'object' && SETUPS.includes(strategy.setup)) return strategy.setup === 'reversal';
+  return !strategyText(strategy) || isReversalBook(strategyText(strategy));
+};
 
 function signalContext(s, tf, reversal) {
   const d = engine.getDetail(s);
@@ -171,7 +176,7 @@ export async function generateAiSignal(symbol, tf, strategy) {
       .filter((t) => t !== '1m' && !s.liveTfs?.has(t))
       .map((t) => Promise.resolve(engine.historyLoader(symbol, t)).catch(() => null)));
   }
-  const rr = strategyRewardRisk(strategyText(strategy));
+  const rr = strategyRewardRisk(strategy); // the book's rr field, else its rule text
   const printed = latestReversal(engine.getCandles(symbol, tf), s.mid);
   const reversal = printed && actsOnReversal(strategy) ? printed : null;
   const eng = engineSignal(s, tf, { rr, reversal });
@@ -209,6 +214,15 @@ export async function generateAiSignal(symbol, tf, strategy) {
 
 const SIGNALS_KEY = 'fxorbit-signals';
 const MAX_CLOSED = 20;
+// A signal no longer waits forever for its TP or SL: after the book's own hold
+// time — or 16 bars of its timeframe (4h on 15m, the trades' default) — the
+// setup is stale, so it closes as "expired" at the live price and the desk
+// generates the next one.
+const SIGNAL_BARS = 16;
+export const signalLifetimeMs = (sig) => strategyMaxHoldMs(sig?.strategyRules) ?? SIGNAL_BARS * tfPeriodMs(sig?.tf);
+export const signalExpiresAt = (sig) => (Number(sig?.expiresAt) > 0
+  ? Number(sig.expiresAt)
+  : (Number(sig?.createdAt) || Date.now()) + signalLifetimeMs(sig));
 
 let book = null;
 let ticking = false;
@@ -239,7 +253,7 @@ function isLiveSignal(s) {
 
 function isOutcome(o) {
   return !!o && typeof o.symbol === 'string'
-    && (o.status === 'tp' || o.status === 'sl')
+    && (o.status === 'tp' || o.status === 'sl' || o.status === 'expired')
     && finite(o.pips) && finite(o.closedAt);
 }
 
@@ -288,6 +302,7 @@ export function saveSignal(result, mode = 'ai') {
     decimals: result.decimals,
     createdAt: Date.now(),
   };
+  sig.expiresAt = sig.createdAt + signalLifetimeMs(sig);
   state().active = [...state().active.filter((s) => s.symbol !== sig.symbol), sig];
   emit();
   return sig;
@@ -301,11 +316,19 @@ async function regenerate(prev) {
   }
 }
 
+function outcomePips(sig, outcome, price) {
+  if (outcome === 'tp') return sig.tpPips;
+  if (outcome === 'sl') return -sig.slPips;
+  const pip = engine.pipFor(sig.symbol);
+  const dir = sig.side === 'LONG' ? 1 : -1;
+  return +(((price - sig.entry) * dir) / pip).toFixed(1);
+}
+
 async function closeSignal(sig, outcome, price) {
   const st = state();
   st.active = st.active.filter((s) => s.id !== sig.id);
   st.closed = [
-    { ...sig, status: outcome, exitPrice: price, pips: outcome === 'tp' ? sig.tpPips : -sig.slPips, closedAt: Date.now() },
+    { ...sig, status: outcome, exitPrice: price, pips: outcomePips(sig, outcome, price), closedAt: Date.now() },
     ...st.closed,
   ].slice(0, MAX_CLOSED);
   emit();
@@ -329,6 +352,7 @@ export async function tickSignals() {
       const hitTp = sig.side === 'LONG' ? s.mid >= sig.tp : s.mid <= sig.tp;
       if (hitSl) await closeSignal(sig, 'sl', s.mid);
       else if (hitTp) await closeSignal(sig, 'tp', s.mid);
+      else if (Date.now() >= signalExpiresAt(sig)) await closeSignal(sig, 'expired', s.mid);
     }
   } finally {
     ticking = false;

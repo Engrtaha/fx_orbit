@@ -4,9 +4,10 @@ import {
 } from 'lightweight-charts';
 import { Activity, Timer } from 'lucide-react';
 import {
-  TIMEFRAMES, barCloseIn, engine, findReversals, fmt, symbolMarketClosed, tfPeriodMs, volatilityPips,
+  TIMEFRAMES, backtestReversals, barCloseIn, engine, findReversals, fmt, symbolMarketClosed, tfPeriodMs, volatilityPips,
 } from '../data/marketEngine';
 import { loadSettings } from '../data/settings';
+import { isReversalBook, rrLabel, strategyMaxHoldMs, strategyRewardRisk } from '../utils/riskReward';
 import { fetchTvHistory } from '../data/tvClient';
 import { chartCapture } from '../data/chartCapture';
 import { Badges, Delta } from './shared';
@@ -16,6 +17,17 @@ const DOWN = 'rgba(251, 75, 106, 0.32)';
 
 // One arrow per reversal print on a closed bar: down-arrows above swept highs,
 // up-arrows below swept lows. "SWP" = liquidity sweep, "RSI" = RSI exhaustion.
+// How the marked reversals would have traded: at the active reversal book's R:R
+// and hold time when there is one, else the engine defaults (1:2.5, 16 bars).
+function reversalBacktest(bars, tf) {
+  const book = loadSettings().activeStrategyData;
+  const own = book && isReversalBook(book);
+  const rr = (own && strategyRewardRisk(book)) || 2.5;
+  const holdMs = own ? strategyMaxHoldMs(book) : null;
+  const maxBars = holdMs ? Math.max(1, Math.round(holdMs / tfPeriodMs(tf))) : 16;
+  return { ...backtestReversals(bars, { rr, maxBars }), book: own ? book.title : null };
+}
+
 const reversalMarkers = (bars) => findReversals(bars).map((r) => ({
   time: r.time,
   position: r.side === 'SHORT' ? 'aboveBar' : 'belowBar',
@@ -88,6 +100,7 @@ export default function PriceChart({ pair, symbol, tf, onTfChange, signal }) {
   const emaLastRef = useRef(null);
   const markersRef = useRef(null);
   const [reversals, setReversals] = useState(0);
+  const [backtest, setBacktest] = useState(null);
   // The series holds the DISPLAYED timeframe's bars; streaming into it before
   // setData has run, or with a bar older than what it holds, makes
   // lightweight-charts throw. Both are tracked here.
@@ -216,6 +229,7 @@ export default function PriceChart({ pair, symbol, tf, onTfChange, signal }) {
       const marks = reversalMarkers(data);
       markersRef.current?.setMarkers(marks);
       setReversals(marks.length);
+      setBacktest({ ...reversalBacktest(data, tf), live: !!engine.getState(symbol)?.liveTfs?.has(tf) });
       chartRef.current.timeScale().fitContent();
       lastBarTimeRef.current = data.length ? data[data.length - 1].time : 0;
       drawnRef.current = true;
@@ -240,6 +254,7 @@ export default function PriceChart({ pair, symbol, tf, onTfChange, signal }) {
         const marks = reversalMarkers(bars);
         markersRef.current?.setMarkers(marks);
         setReversals(marks.length);
+        setBacktest({ ...reversalBacktest(bars, tf), live: !!engine.getState(symbol)?.liveTfs?.has(tf) });
       }
       lastBarTimeRef.current = last.time;
       candleRef.current?.update({
@@ -347,6 +362,20 @@ export default function PriceChart({ pair, symbol, tf, onTfChange, signal }) {
           {symbol} · {tf} · Volatility {fmt(volatilityPips(pair), 1)} pips
           {' · '}{reversals ? `${reversals} reversal${reversals === 1 ? '' : 's'} marked (SWP sweep · RSI exhaustion)` : 'no reversals in view'}
         </div>
+        {backtest?.count > 0 && (
+          <div
+            className={`chart-backtest ${backtest.avgR >= 0 ? 'up' : 'dn'}`}
+            title={'Each marked reversal traded as the engine would: entry at the bar close, stop beyond the swept extreme, '
+              + 'target at the R:R, closed at market after the hold. A bar touching both levels counts as a loss. '
+              + 'A few hundred bars is a small sample — read it as a sanity check, not a promise.'}
+          >
+            Backtest{backtest.live ? '' : ' (simulated bars)'}: {backtest.count} trades
+            {' · '}{Math.round(backtest.winRate * 100)}% won
+            {' · '}avg {backtest.avgR >= 0 ? '+' : ''}{backtest.avgR.toFixed(2)}R
+            {' · '}total {backtest.totalR >= 0 ? '+' : ''}{backtest.totalR.toFixed(1)}R
+            {' '}at {rrLabel(backtest.rr)}, {backtest.maxBars}-bar hold{backtest.book ? ` (${backtest.book})` : ''}
+          </div>
+        )}
         {signal && (
           <div className="chart-sig" style={{ position: 'absolute', top: 28, left: 14, zIndex: 3, pointerEvents: 'none' }}>
             <span className={`chart-sig-side ${signal.side === 'LONG' ? 'up' : 'dn'}`}>{signal.side}</span>

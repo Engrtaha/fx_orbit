@@ -25,8 +25,7 @@ function computeStats(settings = loadSettings()) {
   for (const t of open) {
     const s = engine.getState(t.symbol);
     if (!s?.tv) continue; // a simulated mark is not a price the trade could close at
-    const dir = t.side === 'BUY' ? 1 : -1;
-    unrealized += (((s.mid - t.entry) * dir) / s.pip) * (t.lots / 0.1);
+    unrealized += engine.pnlAt(t, s.mid).pnl;
   }
 
   const weekStart = new Date();

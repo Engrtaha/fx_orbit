@@ -4,9 +4,10 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
-    "dev": "concurrently -k -n web,tv -c blue,magenta \"npm:dev:web\" \"npm:dev:tv\"",
+    "dev": "concurrently -k -n web,tv,ai -c blue,magenta,green \"npm:dev:web\" \"npm:dev:tv\" \"npm:dev:ai\"",
     "dev:web": "vite",
     "dev:tv": "node server/index.js",
+    "dev:ai": "node scripts/dev-ollama.mjs",
     "build": "vite build",
     "lint": "oxlint",
     "test": "vitest run",

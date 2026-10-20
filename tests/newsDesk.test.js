@@ -286,3 +286,49 @@ describe('AI analyst normalization', () => {
     }
   });
 });
+
+describe('reconciling a neutral model answer', () => {
+  const item = { id: 'r1', feed: 'news', title: 'Canadian Dollar: CAD gains against US Dollar on BoC bets', impact: 'medium' };
+
+  it('takes the direction the model\'s own summary states', () => {
+    const out = mod.reconcileNeutral({ sentiment: 'neutral', summary: 'This is bullish for CAD as oil climbs.', trade: { side: 'WAIT' } }, item);
+    expect(out.sentiment).toBe('bullish');
+    expect(out.subject).toEqual({ ccy: 'CAD' });
+    expect(out.trade.side).toBe(''); // the WAIT was a consequence of the neutral field
+    expect(out.reconciled).toBe('summary');
+  });
+
+  it('falls back to the desk read, and never overrides a committed model', () => {
+    const desk = mod.reconcileNeutral({ sentiment: 'neutral', summary: 'Mixed picture.' }, item);
+    expect(desk.sentiment).toBe('bullish');
+    expect(desk.reconciled).toBe('desk');
+    const committed = { sentiment: 'bearish', summary: 'This is bullish for CAD.' };
+    expect(mod.reconcileNeutral(committed, item)).toBe(committed);
+    const flat = { sentiment: 'neutral', summary: 'Nothing here.' };
+    expect(mod.reconcileNeutral(flat, { id: 'r2', feed: 'news', title: 'Markets await data', impact: 'medium' })).toBe(flat);
+  });
+});
+
+describe('headline tone', () => {
+  it('turns a word around after a negator', () => {
+    expect(mod.toneOf('GOLD FAILS TO RALLY')).toBe(-1);
+    expect(mod.toneOf('DOLLAR HALTS SLIDE')).toBe(1);
+    expect(mod.toneOf('EURO PARES GAINS')).toBe(-1);
+    expect(mod.toneOf('FED SIGNALS NO RATE CUT')).toBe(1);
+    expect(mod.toneOf('STOCKS END HIGHER')).toBe(1); // "end" is no negation
+  });
+
+  it('reads extremes as one call and matches whole words where it must', () => {
+    expect(mod.toneOf('YEN AT 18-MONTH LOWS')).toBe(-1);
+    expect(mod.toneOf('GOLD HITS RECORD HIGH')).toBe(1);
+    expect(mod.toneOf('GOLD AT RECORD LOW')).toBe(-1);
+    expect(mod.toneOf('ROSENGREN SPEAKS ON MISSILE DEFENCE')).toBe(0);
+    expect(mod.toneOf('POUND WEAKER')).toBe(-1); // one word, one hit
+  });
+
+  it('drives the desk read end to end', async () => {
+    const a = await mod.analyzeItem(headline({ title: 'Gold fails to hold gains as yields climb', impact: 'medium' }));
+    expect(a.sentiment).toBe('bearish');
+    expect(a.read).toEqual({ symbol: 'XAU/USD', direction: 'bearish' });
+  });
+});

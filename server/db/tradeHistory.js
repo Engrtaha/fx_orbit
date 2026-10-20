@@ -23,6 +23,7 @@ const FIELDS = [
   { col: 'note', key: 'note' },
   { col: 'opened_at', key: 'openedAt' },
   { col: 'closed_at', key: 'closedAt' },
+  { col: 'max_hold_ms', key: 'maxHoldMs' },
 ];
 
 // null/undefined/'' stay SQL NULL; a real 0 must never be swallowed into null.
@@ -35,7 +36,7 @@ export function tradeRow(trade) {
   return FIELDS.map(({ key }) => {
     const v = trade[key];
     if (key === 'id' || key === 'symbol' || key === 'side' || key === 'status') return str(v);
-    if (key === 'openedAt' || key === 'closedAt') return int(v);
+    if (key === 'openedAt' || key === 'closedAt' || key === 'maxHoldMs') return int(v);
     if (key === 'strategyId' || key === 'source' || key === 'exitReason' || key === 'note') return str(v);
     return num(v);
   });
@@ -61,6 +62,7 @@ export function tradeShape(row) {
     note: row.note,
     openedAt: row.opened_at == null ? null : Number(row.opened_at),
     closedAt: row.closed_at == null ? null : Number(row.closed_at),
+    maxHoldMs: row.max_hold_ms == null ? null : Number(row.max_hold_ms),
   };
 }
 

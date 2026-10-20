@@ -265,3 +265,49 @@ describe('reversal signals', () => {
     expect(sig.reversal).toMatchObject({ side: 'SHORT' });
   });
 });
+
+describe('explicit strategy fields on signals', () => {
+  it('uses the book\'s rr field over its text and the default', async () => {
+    seedStorage({ pairs: ['US100', 'XAU/USD', 'EUR/USD'], defaultPair: 'US100' });
+    const sig = await mod.generateAiSignal('EUR/USD', '15m', { name: 'B', rules: 'TP at 1:2 risk to reward', rr: 3.5 });
+    if (sig.side !== 'WAIT') expect(sig.rr).toBeCloseTo(3.5, 2);
+  });
+
+  it('acts on a reversal only for a reversal setup', () => {
+    expect(mod.actsOnReversal({ name: 'x', rules: 'Fade the sweep', setup: 'trend' })).toBe(false);
+    expect(mod.actsOnReversal({ name: 'x', rules: 'Buy the EMA cross', setup: 'reversal' })).toBe(true);
+    expect(mod.actsOnReversal(null)).toBe(true); // AI Best — no book
+  });
+});
+
+describe('signal expiry', () => {
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-10-12T16:00:00Z')); // Monday, tape open
+  });
+  afterEach(() => vi.useRealTimers());
+
+  it('lives for the book\'s hold time, else 16 bars of its timeframe', () => {
+    expect(mod.signalLifetimeMs({ tf: '15m' })).toBe(4 * 3600e3);
+    expect(mod.signalLifetimeMs({ tf: '1H' })).toBe(16 * 3600e3);
+    expect(mod.signalLifetimeMs({ tf: '15m', strategyRules: { rules: '', holdHours: 2 } })).toBe(2 * 3600e3);
+    expect(mod.signalLifetimeMs({ tf: '15m', strategyRules: 'Time-stop: exit after 6 hours' })).toBe(6 * 3600e3);
+  });
+
+  it('closes a stale signal as expired at the live price, then regenerates', async () => {
+    const s = engine.getState('EUR/USD');
+    const sig = mod.saveSignal(sigResult('EUR/USD', 'LONG', s.mid, 1000, 1000), 'ai');
+    expect(sig.expiresAt).toBe(sig.createdAt + 4 * 3600e3);
+    await mod.tickSignals();
+    expect(mod.activeSignalFor('EUR/USD')?.id).toBe(sig.id); // not yet
+
+    vi.setSystemTime(new Date(Date.parse('2026-10-12T16:00:00Z') + 4 * 3600e3 + 1000));
+    const pip = engine.pipFor('EUR/USD');
+    s.mid = sig.entry + 7 * pip; // between SL and TP
+    await mod.tickSignals();
+    const out = mod.recentOutcomes(20).find((o) => o.id === sig.id);
+    expect(out.status).toBe('expired');
+    expect(out.pips).toBeCloseTo(7, 1); // booked at the live price, not at a level
+    expect(mod.activeSignalFor('EUR/USD')?.id).not.toBe(sig.id);
+  });
+});

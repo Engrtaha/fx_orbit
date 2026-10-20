@@ -220,3 +220,40 @@ describe('applyActive', () => {
     expect(s.activeStrategyData).toBeNull();
   });
 });
+
+describe('explicit trade fields', () => {
+  it('fills rr, hold and setup from the rule text of an older record', () => {
+    const s = book.normalizeStrategy({
+      title: 'Liquidity Sweep Reversal',
+      analysis: ['Validated inside session liquidity windows.'],
+      entryRules: ['Sell the sweep of buy-side liquidity'],
+      riskRules: ['TP at 1:4.5 risk to reward', 'Time-stop: exit after 6 hours of stagnation'],
+    });
+    expect(s).toMatchObject({ rr: 4.5, holdHours: 6, setup: 'reversal' });
+  });
+
+  it('does not call a trend book a reversal book over "session liquidity"', () => {
+    const s = book.normalizeStrategy({
+      title: 'EMA Trend-Following Strategy',
+      analysis: ['Validated inside session liquidity windows before entry.'],
+      entryRules: ['Trade only in the long direction while price holds the 21-EMA'],
+      riskRules: ['Stop loss at 1.2× ATR(14)'],
+    });
+    expect(s).toMatchObject({ rr: null, holdHours: null, setup: 'trend' });
+  });
+
+  it('keeps an explicit field — null included — over what the text says', () => {
+    const s = book.normalizeStrategy({ riskRules: ['TP at 1:4.5'], rr: null, holdHours: 2, setup: 'trend' });
+    expect(s).toMatchObject({ rr: null, holdHours: 2, setup: 'trend' });
+    expect(book.normalizeStrategy({ maxHoldHours: 3 }).holdHours).toBe(3); // the model's key
+    expect(book.normalizeStrategy({ rr: 99, holdHours: -1, setup: 'chaos' })).toMatchObject({ rr: null, holdHours: null });
+  });
+
+  it('merges to the first target and the longer hold', () => {
+    const a = book.normalizeStrategy({ title: 'A', entryRules: ['Fade the sweep'], rr: 4.5, holdHours: 2 });
+    const b = book.normalizeStrategy({ title: 'B', entryRules: ['Buy the EMA cross'], rr: 2, holdHours: 6 });
+    const m = book.mergeStrategies(a, b);
+    expect(m).toMatchObject({ rr: 4.5, holdHours: 6, setup: 'reversal' });
+    expect(m.analysis.join(' ')).toContain('enter differently');
+  });
+});

@@ -69,7 +69,6 @@ export default function NewsPage() {
   const [scope, setScope] = useState('pairs');
   const [selectedId, setSelectedId] = useState(null);
   const [analyses, setAnalyses] = useState({});
-  const [analyzing, setAnalyzing] = useState(null);
   const [placed, setPlaced] = useState({});
   const [, setTick] = useState(0);
   const [nowSec, setNowSec] = useState(() => Math.floor(Date.now() / 1000));
@@ -145,18 +144,19 @@ export default function NewsPage() {
     setSettings((s) => ({ ...s, newsCategory }));
   };
 
+  // Every clicked item gets its own read. A single in-flight guard used to drop
+  // a click made while another read was running: the row was selected but never
+  // analysed, leaving an empty panel for good — and a local model takes 20-45 s
+  // per read, so that was most clicks. Requests queue at the model instead.
   const analyze = async (item) => {
     setSelectedId(item.id);
-    if (analyses[item.id] || analyzing) return;
-    setAnalyzing(item.id);
+    if (analyses[item.id] && !analyses[item.id].error) return;
     setAnalyses((prev) => ({ ...prev, [item.id]: { loading: true } }));
     try {
       const result = await analyzeItem(item);
       setAnalyses((prev) => ({ ...prev, [item.id]: result }));
     } catch (err) {
       setAnalyses((prev) => ({ ...prev, [item.id]: { error: String(err?.message ?? err) } }));
-    } finally {
-      setAnalyzing(null);
     }
   };
 
@@ -369,15 +369,19 @@ export default function NewsPage() {
         {!feedError && settings.newsProvider === 'rss' && (
           <p className="ai-note">
             Headlines stream from keyless RSS desks — FXStreet, ForexLive, Investing.com and CNBC — so the
-            desk stays current with no API key. Analysis runs on the desk heuristic until an AI model key
-            is set in Settings.
+            desk stays current with no API key.{' '}
+            {aiReady(settings)
+              ? `Analysis runs on ${settings.aiModel || 'your model'}.`
+              : 'Analysis runs on the desk heuristic until an AI model is set up in Settings.'}
           </p>
         )}
         {settings.newsProvider !== 'rss' && !settings.newsApiKey && !feedError && (
           <p className="ai-note">
             The economic calendar is live without a key. Add a headline provider key above to also pull macro
-            news with sentiment scores — or switch the provider to RSS for keyless headlines. Analysis runs on
-            the desk heuristic until an AI model key is set in Settings.
+            news with sentiment scores — or switch the provider to RSS for keyless headlines.{' '}
+            {aiReady(settings)
+              ? `Analysis runs on ${settings.aiModel || 'your model'}.`
+              : 'Analysis runs on the desk heuristic until an AI model is set up in Settings.'}
           </p>
         )}
       </section>
@@ -452,14 +456,19 @@ export default function NewsPage() {
             <div className="panel-head">
               <span className="panel-title"><Sparkles size={14} /> AI desk read</span>
               {selectedAnalysis && !selectedAnalysis.error && (
-                <span className="panel-sub">{selectedAnalysis.simulated ? 'desk heuristic' : 'model analysed'}</span>
+                <span className="panel-sub">
+                  {selectedAnalysis.loading ? 'analysing…' : selectedAnalysis.simulated ? 'desk heuristic' : 'model analysed'}
+                </span>
               )}
             </div>
 
             {!selected && <p className="ai-note">Pick a news item to analyze its impact and generate a trade plan.</p>}
             {selectedAnalysis?.error && <p className="ai-error"><AlertTriangle size={13} /> {selectedAnalysis.error}</p>}
             {selectedAnalysis?.loading && (
-              <div className="ai-shimmer"><div className="sh-line w60" /><div className="sh-line w90" /><div className="sh-line w40" /></div>
+              <>
+                <div className="ai-shimmer"><div className="sh-line w60" /><div className="sh-line w90" /><div className="sh-line w40" /></div>
+                {aiReady(settings) && <p className="ai-note">Waiting for {settings.aiModel || 'the model'} — a local model can take up to a minute, longer while it loads.</p>}
+              </>
             )}
 
             {selected && selectedAnalysis && !selectedAnalysis.loading && !selectedAnalysis.error && (() => {
@@ -478,6 +487,14 @@ export default function NewsPage() {
                       </span>
                     )}
                     {a.simulated && <span className="chip">simulated</span>}
+                    {a.reconciled && (
+                      <span className="chip" title={a.reconciled === 'summary'
+                        ? 'The model answered "neutral" but its own summary states this direction'
+                        : 'The model answered "neutral"; the desk read found a clear edge'}
+                      >
+                        direction from {a.reconciled === 'summary' ? 'model summary' : 'desk read'}
+                      </span>
+                    )}
                     {a.aiError && <span className="chip warn">AI fallback</span>}
                   </div>
                   {a.aiError && <p className="ai-note">AI backend error — showing the desk heuristic. {a.aiError}</p>}

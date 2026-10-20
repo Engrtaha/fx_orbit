@@ -14,7 +14,7 @@ import {
   downscale, parseJsonLoose, aiReady, aiChat, aiErrorText, aiSupportsVision, attachmentContent,
   fileKind, readFile, clipText, videoFrames,
 } from '../utils/ai';
-import { isReversalBook } from '../utils/riskReward';
+import { isReversalBook, rrLabel } from '../utils/riskReward';
 
 const MAX_FILES = 8;
 const MAX_MB = 25;
@@ -54,8 +54,11 @@ const SYSTEM_PROMPT = [
   'Analyze the trading strategy the user describes (text plus any attached screenshots, video frames, or document excerpts) and respond with ONLY a JSON object (no markdown) shaped:',
   '{"title":"short strategy name","pair":"best instrument symbol for it, e.g. XAU/USD",',
   '"analysis":["paragraph 1","paragraph 2"],"entryRules":["rule","rule","rule"],',
-  '"riskRules":["rule","rule","rule"],"timeframes":["1m","5m"]}',
+  '"riskRules":["rule","rule","rule"],"timeframes":["1m","5m"],"rr":4.5,"maxHoldHours":4,"setup":"reversal|trend"}',
   'Mirror the direction the user describes exactly: a strategy that buys dips is a LONG strategy — never describe it as short.',
+  '"rr" is the reward:risk target the user states (1:4.5 → 4.5), null when none is stated. "maxHoldHours" is how long a trade may stay open',
+  '(a time-stop rule), null when none is stated. "setup" is "reversal" for strategies that enter on sweeps, rejections or exhaustion',
+  'against the move, "trend" for strategies that enter with it.',
   '"timeframes" lists the chart timeframes the strategy actually trades on (choose from 1m, 5m, 15m, 1H, 4H, 1D);',
   'send an empty array or omit it when the strategy is not timeframe-specific.',
 ].join(' ');
@@ -65,7 +68,7 @@ const MERGE_PROMPT = [
   'Merge the two strategies below into ONE book that preserves BOTH parents\' setups. Respond with ONLY a JSON object (no markdown) shaped:',
   '{"title":"short name for the merged book","pair":"single instrument symbol",',
   '"analysis":["paragraph 1","paragraph 2"],"entryRules":["rule"],"riskRules":["rule"],',
-  '"timeframes":["1m","5m"]}',
+  '"timeframes":["1m","5m"],"rr":4.5,"maxHoldHours":4,"setup":"reversal|trend"}',
   'Keep EVERY rule that does not conflict, from BOTH parents: the merged book fires when EITHER parent\'s setup is fulfilled.',
   'When one parent trades long (bullish trend, green confirmation candle) and the other trades short (bearish trend, red confirmation candle), the merged book MUST contain BOTH a long setup and a short setup. Never reduce a two-sided book to one direction, and never copy only one parent.',
   'When two rules genuinely conflict, keep the stricter one and explain why in the analysis.',
@@ -204,6 +207,13 @@ function simulatedStrategy(text, snapshot) {
   };
 }
 
+// "Reversal · R:R 1:4.5 · hold 4h" — the numbers the engine trades this book by.
+const tradeSummary = (s) => [
+  s.setup === 'reversal' ? 'Reversal' : 'Trend',
+  `R:R ${s.rr ? rrLabel(s.rr) : '1:2.5 (default)'}`,
+  `hold ${s.holdHours ? `${+s.holdHours}h` : '4h (default)'}`,
+].join(' · ');
+
 const lines = (text) => String(text ?? '').split('\n').map((l) => l.trim()).filter(Boolean);
 
 const relTime = (ts) => {
@@ -306,6 +316,9 @@ export default function StrategiesPage() {
     title: s.title,
     pair: s.pair,
     timeframes: [...(s.timeframes ?? [])],
+    rr: s.rr ?? '',
+    holdHours: s.holdHours ?? '',
+    setup: s.setup ?? 'trend',
     analysis: s.analysis.join('\n'),
     entryRules: s.entryRules.join('\n'),
     riskRules: s.riskRules.join('\n'),
@@ -316,6 +329,11 @@ export default function StrategiesPage() {
       title: edit.title,
       pair: edit.pair,
       timeframes: edit.timeframes,
+      // An emptied box is a choice — "use the engine default" — so it saves as
+      // null rather than falling back to whatever the rule text says.
+      rr: edit.rr === '' ? null : Number(edit.rr),
+      holdHours: edit.holdHours === '' ? null : Number(edit.holdHours),
+      setup: edit.setup,
       analysis: lines(edit.analysis),
       entryRules: lines(edit.entryRules),
       riskRules: lines(edit.riskRules),
@@ -610,6 +628,7 @@ export default function StrategiesPage() {
             {draft.simulated && <span className="draft-sim">simulated read</span>}
           </div>
           <p className="draft-sum">{draft.analysis[0]}</p>
+          <p className="strat-tfs"><Layers size={12} /> {tradeSummary(draft)} — edit after saving to change.</p>
           {draft.timeframes.length > 0 && (
             <p className="strat-tfs">
               <Clock size={12} /> Generates trades on the {timeframeLabel(draft.timeframes)} timeframe{draft.timeframes.length > 1 ? 's' : ''} only —
@@ -672,6 +691,7 @@ export default function StrategiesPage() {
                   {s.timeframes.length > 0 && (
                     <span className="tfs">{s.timeframes.join(' · ')} only</span>
                   )}
+                  <span>{tradeSummary(s)}</span>
                   <span>{s.entryRules.length} entries</span>
                   <span>{s.riskRules.length} risk</span>
                   <span>{relTime(s.updatedAt)}</span>
@@ -746,6 +766,29 @@ export default function StrategiesPage() {
                 : 'None picked — the strategy trades every timeframe.'}
             </span>
           </div>
+          <div className="field-row">
+            <div className="field">
+              <label>Setup</label>
+              <select className="inp" value={edit.setup} onChange={(e) => setEdit({ ...edit, setup: e.target.value })}>
+                <option value="reversal">Reversal — enters on sweeps / exhaustion</option>
+                <option value="trend">Trend — enters with the move (EMA cross)</option>
+              </select>
+            </div>
+            <div className="field">
+              <label>Reward : risk (1 : x)</label>
+              <input className="inp" type="number" min="0.5" max="20" step="0.1" placeholder="2.5 (default)"
+                value={edit.rr} onChange={(e) => setEdit({ ...edit, rr: e.target.value })} />
+            </div>
+            <div className="field">
+              <label>Max hold (hours)</label>
+              <input className="inp" type="number" min="0.1" max="720" step="0.5" placeholder="4 (default)"
+                value={edit.holdHours} onChange={(e) => setEdit({ ...edit, holdHours: e.target.value })} />
+            </div>
+          </div>
+          <span className="tf-hint">
+            Signals and auto-trades use these numbers: the target is the stop × R:R, and a trade or signal
+            still open after the max hold is closed at market.
+          </span>
           <div className="field">
             <label>Analysis — one paragraph per line</label>
             <textarea className="inp strat-desc" value={edit.analysis} onChange={(e) => setEdit({ ...edit, analysis: e.target.value })} />
@@ -772,6 +815,9 @@ export default function StrategiesPage() {
               {active && <button className="btn ghost xs" onClick={() => activate('')}><X size={11} /> Unset</button>}
             </div>
             <h2 className="active-title">{active ? active.title : 'No active strategy yet'}</h2>
+            {active && (
+              <p className="strat-tfs"><Layers size={12} /> {tradeSummary(active)}</p>
+            )}
             {active && (
               <p className="strat-tfs">
                 <Clock size={12} />

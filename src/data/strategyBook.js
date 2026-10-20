@@ -8,6 +8,7 @@
 
 import { TIMEFRAMES } from './marketEngine';
 import { loadSettings, loadStrategies, saveSettings, saveStrategies } from './settings';
+import { SETUPS, fieldsFromText, validHoldHours, validRr } from '../utils/riskReward';
 
 let seq = 0;
 const newId = () => `s-${Date.now().toString(36)}-${(seq += 1).toString(36)}`;
@@ -65,6 +66,21 @@ export function allowedTimeframes(s) {
   return explicit?.length ? explicit : TIMEFRAMES;
 }
 
+// The three numbers the engine trades a book by: its target R:R, how long a
+// trade may stay open, and whether it enters on reversals or with the trend.
+// A field the record has is kept (null = engine default); a record from before
+// the fields existed — or a model reply that omitted them — gets what its own
+// rule text says. A model's `maxHoldHours` is accepted as `holdHours`.
+function tradeFields(s) {
+  const fromText = fieldsFromText(s);
+  const holdKey = Object.hasOwn(s, 'holdHours') ? 'holdHours' : Object.hasOwn(s, 'maxHoldHours') ? 'maxHoldHours' : null;
+  return {
+    rr: Object.hasOwn(s, 'rr') ? validRr(s.rr) : fromText.rr,
+    holdHours: holdKey ? validHoldHours(s[holdKey]) : fromText.holdHours,
+    setup: SETUPS.includes(s.setup) ? s.setup : fromText.setup,
+  };
+}
+
 // One shape for everything the rest of the app touches, so a half-written model
 // response or a legacy record can't leak undefined arrays into the UI.
 export function normalizeStrategy(s = {}) {
@@ -83,6 +99,7 @@ export function normalizeStrategy(s = {}) {
       : (detectTimeframes(s) ?? []),
     armed: !!s.armed,
     simulated: !!s.simulated,
+    ...tradeFields(s),
     createdAt: Number.isFinite(s.createdAt) ? s.createdAt : stamp,
     updatedAt: Number.isFinite(s.updatedAt) ? s.updatedAt : stamp,
   };
@@ -155,8 +172,16 @@ export function mergeStrategies(a, b) {
     : [];
   const dirs = new Set([...bookDirections(a), ...bookDirections(b)]);
   const twoSided = dirs.has('bull') && dirs.has('bear');
+  const setupNote = a.setup && b.setup && a.setup !== b.setup
+    ? `The parents enter differently (${a.setup} vs ${b.setup}); the merged book keeps the first parent's ${a.setup} entries — change Setup to switch.`
+    : '';
   return normalizeStrategy({
     title: `${shortTitle(a.title)} × ${shortTitle(b.title)} Merge`,
+    // The first parent's target stands; the longer hold keeps both parents'
+    // trades alive long enough to reach their levels.
+    rr: a.rr ?? b.rr ?? null,
+    holdHours: Math.max(a.holdHours ?? 0, b.holdHours ?? 0) || null,
+    setup: a.setup ?? b.setup,
     pair: a.pair, // one book trades one pair; a disagreement is noted below
     analysis: [
       `Combines “${a.title}” and “${b.title}”. Setups from either parent are valid — whichever one's`
@@ -165,6 +190,7 @@ export function mergeStrategies(a, b) {
       a.analysis[0] ?? '',
       b.analysis[0] ?? '',
       samePair ? '' : `Parents target different pairs (${a.pair} and ${b.pair}); this merged book trades ${a.pair} only.`,
+      setupNote,
     ].filter(Boolean),
     entryRules: union(a.entryRules, b.entryRules),
     riskRules: union(a.riskRules, b.riskRules),

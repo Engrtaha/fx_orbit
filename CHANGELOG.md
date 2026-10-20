@@ -4,6 +4,34 @@ All notable changes to FxOrbit are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project is versioned by
 date and commit while it stays pre-1.0.
 
+## 2026-10-20 — Known limits closed
+
+### Changed
+
+- **Each instrument has its own pip value.** One lot is the instrument's contract —
+  100,000 units of FX, 100 oz gold, 5,000 oz silver, 1/point index CFDs, 100 shares,
+  1 coin — and a pip is converted to USD at live crosses. US100 is $1/point per lot
+  (was $10), USD/JPY ~$6.7/pip. Sizing uses the same value, so a stop still costs
+  exactly Risk Per Trade; a 30x exposure cap replaces the flat 10-lot ceiling.
+- **Strategies carry explicit trade fields** — Setup (reversal / trend), Reward:risk
+  and Max hold (hours) — editable in the strategy editor and returned by the AI
+  analyst. Rule text is read only to fill them for older records. "Session
+  liquidity" no longer marks a trend book as a reversal book.
+- **Hold time is stored with each trade** (`max_hold_ms`, added in place to existing
+  archives, including databases seeded from the Docker snapshot).
+- **Signals expire** after the book's hold time, else 16 bars of their timeframe, and
+  are booked "expired" at the live price before the next one is generated.
+- **Reversal backtest on the chart:** every marked reversal replayed at the book's R:R
+  and hold (pessimistic on bars touching both levels). On 300 real bars × 8
+  instruments the default detector was positive on 15m (+0.3R/trade at 1:2.5) and
+  1H at 1:4.5, negative on 5m and 4H — thresholds are left untuned on purpose.
+- **News tone handles negation and extremes:** "fails to rally", "halts slide",
+  "pares gains", "no rate cut", "18-month lows", "record high"; whole-word keys stop
+  "Rosengren" and "missile" from scoring.
+- **Pages load on demand:** the initial bundle fell from 646 kB to 284 kB.
+- **Page tests:** every page is rendered against seeded state (balance window,
+  R:R, reversal badge, expiry, strategy fields) — no new dependencies.
+
 ## 2026-10-20 — Account sizing, strategy R:R, reversals, news direction, Ollama
 
 ### Fixed

@@ -9,12 +9,17 @@ import { loadSettings } from '../data/settings';
 import { allowedTimeframes, bookDirections, timeframeLabel } from '../data/strategyBook';
 import { rrLabel, strategyRewardRisk } from '../utils/riskReward';
 import {
-  generateAiSignal, saveSignal, activeSignals, recentOutcomes, subscribeSignals, signalProgress,
+  generateAiSignal, saveSignal, activeSignals, recentOutcomes, subscribeSignals, signalProgress, signalExpiresAt,
 } from '../data/signalEngine';
 
 const ago = (ts) => {
   const m = Math.max(1, Math.round((Date.now() - ts) / 60000));
   return m < 60 ? `${m}m ago` : `${Math.round(m / 60)}h ago`;
+};
+
+const expiresIn = (sig) => {
+  const mins = Math.max(0, Math.round((signalExpiresAt(sig) - Date.now()) / 60000));
+  return mins < 60 ? `${mins}m` : mins < 2880 ? `${Math.floor(mins / 60)}h ${mins % 60}m` : `${Math.round(mins / 1440)}d`;
 };
 
 const untilLabel = (d) => {
@@ -90,7 +95,11 @@ export default function SignalsPage() {
       .filter(Boolean)
       .join(' ')
       .slice(0, 2400);
-    return { name: strategyName, rules: rules + tfNote + orNote };
+    // The explicit fields travel with the rules, so a regenerated signal keeps
+    // the book's R:R, hold time and setup even after the page is gone.
+    return {
+      name: strategyName, rules: rules + tfNote + orNote, rr: d.rr ?? null, holdHours: d.holdHours ?? null, setup: d.setup,
+    };
   };
 
   const generate = async () => {
@@ -100,7 +109,7 @@ export default function SignalsPage() {
       const rules = strategyRules();
       const r = await generateAiSignal(pair, effTf, rules);
       if (r) {
-        const enriched = { ...r, strategyRules: rules?.rules ?? null };
+        const enriched = { ...r, strategyRules: rules ?? null };
         if (enriched.side !== 'WAIT' && enriched.sl != null && enriched.tp != null) {
           saveSignal(enriched, mode);
         }
@@ -216,7 +225,7 @@ export default function SignalsPage() {
         <div className="panel-head">
           <span className="panel-title"><Radio size={14} /> Active signals</span>
           <span className="panel-sub">
-            {liveSigs.length} live · held to TP/SL, then regenerated
+            {liveSigs.length} live · held to TP/SL or expiry, then regenerated
             {weekend ? ' — FX signals rest over the weekend, crypto signals keep running' : ''}
           </span>
         </div>
@@ -269,6 +278,7 @@ export default function SignalsPage() {
                 {toTp != null && <span>to TP {toTp}p</span>}
                 {toSl != null && <span>to SL {toSl}p</span>}
                 <span>opened {ago(sig.createdAt)}</span>
+                <span>expires in {expiresIn(sig)}</span>
                 <span>{prog.mid != null ? `live ${fmt(prog.mid, prog.decimals)}` : 'price unavailable'}</span>
               </div>
             </div>
