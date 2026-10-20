@@ -1,0 +1,45 @@
+# FxOrbit database — the project's PostgreSQL, containerized.
+#
+# Seeded on FIRST boot from docker/init/01-fxorbit.sql, a snapshot of the live
+# fxorbit database taken 2026-10-20 (123 trades, 765 news items). After the
+# first boot the data lives in the fxorbit-pgdata volume and the seed is not
+# re-read; `docker compose down -v` erases the volume so the next `up`
+# reseeds from the snapshot again.
+#
+#   docker compose up -d     start
+#   docker compose down      stop (data survives in the volume)
+#   docker compose down -v   stop and erase the data
+#
+# Port 5432 is published on host port 5433, bound to loopback only, so the
+# container never fights the Homebrew PostgreSQL that owns localhost:5432.
+# Point the bridge at it with:
+#
+#   DATABASE_URL='postgres://fxorbit@localhost:5433/fxorbit' npm run dev
+#
+# POSTGRES_HOST_AUTH_METHOD=trust accepts connections without a password —
+# the same posture as the Homebrew default it mirrors — and is safe only
+# because the port is bound to 127.0.0.1. The binding and the trust auth
+# must change together, never one without the other.
+
+services:
+  db:
+    image: postgres:17-alpine
+    container_name: fxorbit-db
+    environment:
+      POSTGRES_USER: fxorbit
+      POSTGRES_DB: fxorbit
+      POSTGRES_HOST_AUTH_METHOD: trust
+    ports:
+      - "127.0.0.1:5433:5432"
+    volumes:
+      - fxorbit-pgdata:/var/lib/postgresql/data
+      - ./docker/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fxorbit -d fxorbit"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+volumes:
+  fxorbit-pgdata:

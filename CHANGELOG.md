@@ -4,6 +4,27 @@ All notable changes to FxOrbit are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project is versioned by
 date and commit while it stays pre-1.0.
 
+## 2026-10-20 — Database in Docker
+
+The project's PostgreSQL now runs containerized, seeded from a snapshot of the live
+database. The bridge works against either database unchanged — only the
+`DATABASE_URL` differs.
+
+### Added
+
+- `docker-compose.yml` running `postgres:17-alpine` as `fxorbit-db`, published on
+  **loopback-only host port 5433** (so it never fights a PostgreSQL already owning
+  5432), with a healthcheck and a `fxorbit-pgdata` volume that survives `down`.
+- `docker/init/01-fxorbit.sql` — a snapshot of the live `fxorbit` database
+  (123 trades, 765 news items) that seeds the container on first boot;
+  `docker compose down -v` erases the volume so the next `up` seeds it again.
+- `docker/README.md` — running it, connecting
+  (`postgres://fxorbit@localhost:5433/fxorbit`), pointing the bridge at it, and
+  refreshing the snapshot.
+- The container uses trust auth, the same no-password posture as the Homebrew
+  default it mirrors — safe only because the port is bound to `127.0.0.1`; the
+  two settings are documented as changing together.
+
 ## 2026-10-18 — Full QA and security pass
 
 A professional QA pass over the bridge server, the market engine, the chart and both
