@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { DollarSign, TrendingUp, Percent, Target } from 'lucide-react';
 import { engine, fmt } from '../data/marketEngine';
-import { loadSettings, subscribeSettings, accountBalance } from '../data/settings';
+import { loadSettings, subscribeSettings, accountBalance, inAccount } from '../data/settings';
 
 const money = (v) => `${v < 0 ? '-' : ''}$${Math.abs(v).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 const signed = (v) => `${v >= 0 ? '+' : ''}${money(v)}`;
@@ -28,9 +28,10 @@ const weekStart = () => {
 
 const greeting = (h) => (h < 12 ? 'Good Morning' : h < 18 ? 'Good Afternoon' : 'Good Evening');
 
-function computeStats() {
+function computeStats(settings = loadSettings()) {
   const trades = engine.getTrades();
-  const closed = trades.filter((t) => t.status === 'closed');
+  // Same account window as Portfolio — the two pages must never disagree.
+  const closed = trades.filter((t) => t.status === 'closed' && inAccount(t, settings));
   const wins = closed.filter((t) => t.pnl > 0).length;
   const netPnl = closed.reduce((a, t) => a + t.pnl, 0);
   const ws = weekStart();
@@ -58,7 +59,7 @@ export default function DashboardPage() {
 
   useEffect(() => {
     const unsub = engine.subscribe(() => setStats(computeStats()));
-    const unsubSettings = subscribeSettings(setSettings);
+    const unsubSettings = subscribeSettings((next) => { setSettings(next); setStats(computeStats(next)); });
     const t = setInterval(() => setNow(new Date()), 1000);
     return () => { unsub(); unsubSettings(); clearInterval(t); };
   }, []);

@@ -11,9 +11,10 @@ import {
 } from '../data/strategyBook';
 import PriceChart from '../components/PriceChart';
 import {
-  downscale, parseJsonLoose, aiReady, aiChat, aiSupportsVision, attachmentContent,
+  downscale, parseJsonLoose, aiReady, aiChat, aiErrorText, aiSupportsVision, attachmentContent,
   fileKind, readFile, clipText, videoFrames,
 } from '../utils/ai';
+import { isReversalBook } from '../utils/riskReward';
 
 const MAX_FILES = 8;
 const MAX_MB = 25;
@@ -326,7 +327,9 @@ export default function StrategiesPage() {
 
   const toggleArm = (s) => {
     write(armStrategy(library, s.id, !s.armed));
-    flash(s.armed ? `“${s.title}” disarmed` : `“${s.title}” armed — it trades ${s.pair} off the EMA cross`);
+    flash(s.armed
+      ? `“${s.title}” disarmed`
+      : `“${s.title}” armed — it trades ${s.pair} ${isReversalBook(s) ? 'on live reversals (sweeps / RSI exhaustion)' : 'off the EMA cross'}`);
   };
 
   const removeOne = (s) => {
@@ -360,7 +363,7 @@ export default function StrategiesPage() {
           const text = await aiChat(settings, [
             { role: 'system', content: MERGE_PROMPT },
             { role: 'user', content: `Strategy A:\n${JSON.stringify(a, null, 1)}\n\nStrategy B:\n${JSON.stringify(b, null, 1)}` },
-          ], { temperature: 0.1 });
+          ], { temperature: 0.1, json: true });
           const parsed = parseJsonLoose(text);
           const modelBook = parsed ? normalizeStrategy(parsed) : null;
           // A reply that collapses a long-only + short-only pair into one side
@@ -437,7 +440,7 @@ export default function StrategiesPage() {
         const text = await aiChat(settings, [
           { role: 'system', content: SYSTEM_PROMPT },
           { role: 'user', content },
-        ]);
+        ], { json: true });
         const parsed = parseJsonLoose(text);
         if (!parsed) throw new Error('Could not parse the model response.');
         setDraft(normalizeStrategy({
@@ -451,7 +454,7 @@ export default function StrategiesPage() {
         setDraft(normalizeStrategy({ ...simulatedStrategy(desc, pairs), origin: 'ai', simulated: true }));
       }
     } catch (err) {
-      setError(err.message || 'Analysis failed. Check your AI model settings.');
+      setError(aiErrorText(settings, err) || 'Analysis failed. Check your AI model settings.');
     } finally {
       setBusy(false);
     }

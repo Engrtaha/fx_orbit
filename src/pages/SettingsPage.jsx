@@ -12,6 +12,9 @@ import {
 } from '../utils/ai';
 import { fetchJson, BRIDGE_TIMEOUT_MS, AI_TIMEOUT_MS } from '../utils/http';
 
+const OLLAMA_INSTALL = 'install it from ollama.com/download (Linux: curl -fsSL https://ollama.com/install.sh | sh), '
+  + `then: ollama pull ${AI_PROVIDERS.ollama.model}`;
+
 // Ollama lists one tag twice when the model sits behind two manifests on disk,
 // and these ids are React keys + the installed count — dedupe at the source.
 const modelIds = (payload) => [...new Set((payload?.data ?? []).map((m) => m.id).filter(Boolean))];
@@ -119,6 +122,14 @@ export default function SettingsPage() {
   const provider = aiProviderOf(settings);
   const prov = AI_PROVIDERS[provider];
 
+  // The provider pills, model pills and fields only edit this page's draft;
+  // every other page reads what is SAVED. A passing "Test connection" on an
+  // unsaved Ollama draft left the app on OpenAI with no key — every analysis
+  // silently simulated — so the page says so until the draft is saved.
+  const stored = loadSettings();
+  const aiDirty = ['aiProvider', 'aiModel', 'aiBaseUrl', 'aiApiKey']
+    .some((k) => String(settings[k] ?? '').trim() !== String(stored[k] ?? '').trim());
+
   const switchProvider = (p) => {
     if (p === provider) return;
     const cur = settings.aiModel.trim();
@@ -149,7 +160,8 @@ export default function SettingsPage() {
     } catch (err) {
       setModelsHint({
         ok: false,
-        msg: `Ollama not reachable at ${settings.aiBaseUrl} — is it running? Start it with: ollama serve (${err.message})`,
+        msg: `Ollama not reachable at ${settings.aiBaseUrl} — is it running? Start it with: ollama serve. `
+          + `Not installed yet? ${OLLAMA_INSTALL} (${err.message})`,
       });
     } finally {
       setFetchingModels(false);
@@ -173,7 +185,11 @@ export default function SettingsPage() {
         timeoutMs: AI_TIMEOUT_MS,
       });
       const text = (data.choices?.[0]?.message?.content ?? '').trim().slice(0, 60);
-      setAiTest({ ok: true, msg: `${settings.aiModel.trim() || prov.model} replied "${text || '(empty)'}" in ${((performance.now() - t0) / 1000).toFixed(1)} s` });
+      setAiTest({
+        ok: true,
+        msg: `${settings.aiModel.trim() || prov.model} replied "${text || '(empty)'}" in ${((performance.now() - t0) / 1000).toFixed(1)} s`
+          + (aiDirty ? ' — not saved yet: click Save AI Settings so News, Signals and Strategies use it.' : ''),
+      });
     } catch (err) {
       const model = settings.aiModel.trim() || prov.model;
       let why = provider === 'ollama'
@@ -184,7 +200,7 @@ export default function SettingsPage() {
         // up as a failure here — ask Ollama which one it is before reporting.
         const listed = await fetchJson(modelsEndpoint(settings)).catch(() => null);
         if (!listed) {
-          why = `Ollama is not reachable at ${settings.aiBaseUrl} — start it with: ollama serve`;
+          why = `Ollama is not reachable at ${settings.aiBaseUrl} — start it with: ollama serve. Not installed yet? ${OLLAMA_INSTALL}`;
         } else if (!(listed.data ?? []).some((m) => m.id === model)) {
           why = `${model} is not on this machine yet — run: ollama pull ${model} `
             + '(a download that is still in progress answers 404 until it finishes)';
@@ -207,6 +223,7 @@ export default function SettingsPage() {
     const stopped = provider === 'ollama'
       ? await unloadOtherOllamaModels({ aiProvider: provider, aiModel: model, aiBaseUrl: base })
       : [];
+    setSettings((cur) => ({ ...cur, aiModel: model, aiBaseUrl: base, aiApiKey: cur.aiApiKey.trim() }));
     notify(stopped.length
       ? `Saved — stopped ${stopped.join(', ')}; only ${model} stays in memory`
       : 'AI model settings saved');
@@ -419,6 +436,12 @@ export default function SettingsPage() {
             <Activity size={14} /> {aiTesting ? 'Testing…' : 'Test connection'}
           </button>
         </div>
+        {aiDirty && (
+          <span className="field-hint bad">
+            Unsaved — the rest of the app still uses {AI_PROVIDERS[aiProviderOf(stored)].label}
+            {stored.aiModel ? ` (${stored.aiModel})` : ''} until you click Save AI Settings.
+          </span>
+        )}
         {modelsHint && <span className={`field-hint ${modelsHint.ok ? 'ok' : 'bad'}`}>{modelsHint.msg}</span>}
         {aiTest && <span className={`field-hint ${aiTest.ok ? 'ok' : 'bad'}`}>{aiTest.msg}</span>}
         <span className="field-hint">

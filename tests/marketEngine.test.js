@@ -4,6 +4,7 @@ import { seedStorage } from './setup.js';
 seedStorage({ pairs: ['US100', 'XAU/USD'], defaultPair: 'XAU/USD' });
 const {
   engine, fmt, marketClosed, symbolMarketClosed, volatilityPips, TIMEFRAMES, barCloseIn, tfPeriodMs,
+  findReversals, latestReversal, reversalAt,
 } = await import('../src/data/marketEngine.js');
 const { UNIVERSE } = await import('../src/data/settings.js');
 
@@ -84,12 +85,35 @@ describe('trade lifecycle', () => {
     expect(t.pips).toBe(-15);
   });
 
-  it('time-stops trades that overstay', () => {
+  it('time-stops trades that overstay, on the wall clock', () => {
     const s = engine.getState('XAU/USD');
     const t = engine.openTrade({ symbol: 'XAU/USD', side: 'BUY', slPips: 10, tpPips: 20 });
-    engine.tickCount = t.openTick + 241;
+    engine.tickCount = t.openTick + 10_000; // ticks no longer decide: 240 of them was 3.6 minutes
+    engine.checkTradeExits(s);
+    expect(t.status).toBe('open');
+    t.openedAt = Date.now() - 3.9 * 3600e3;
+    engine.checkTradeExits(s);
+    expect(t.status).toBe('open');
+    t.openedAt = Date.now() - 4.1 * 3600e3;
     engine.checkTradeExits(s);
     expect(t.exitReason).toBe('Time Stop');
+  });
+
+  it('holds a trade for its own or its strategy\'s time', () => {
+    const s = engine.getState('XAU/USD');
+    const own = engine.openTrade({ symbol: 'XAU/USD', side: 'BUY', slPips: 10, tpPips: 20, maxHoldMs: 72 * 3600e3 });
+    own.openedAt = Date.now() - 10 * 3600e3;
+    engine.checkTradeExits(s);
+    expect(own.status).toBe('open');
+    engine.closeTrade(own, own.entry, 'cleanup');
+
+    engine.strategies = [{ id: 'st-hold', riskRules: ['Time-stop: exit any trade still open after 1 hours of stagnation'] }];
+    const t = engine.openTrade({ symbol: 'XAU/USD', side: 'BUY', slPips: 10, tpPips: 20, strategyId: 'st-hold' });
+    expect(engine.holdFor(t)).toBe(3600e3); // restored rows carry no maxHoldMs: the book's rule applies
+    t.openedAt = Date.now() - 2 * 3600e3;
+    engine.checkTradeExits(s);
+    expect(t.exitReason).toBe('Time Stop');
+    engine.strategies = [];
   });
 
   it('ignores repeat closes and keeps stats consistent with the book', () => {
@@ -122,7 +146,7 @@ describe('risk-based position sizing', () => {
     const pct = engine.riskPct();
     for (const slPips of [25, 60, 237]) {
       const loss = (engine.riskLots(slPips) / 0.1) * slPips; // $ at a stop-out
-      expect(Math.abs(loss - eq * pct) / (eq * pct)).toBeLessThan(0.02); // 0.01 lot rounding
+      expect(Math.abs(loss - eq * pct) / (eq * pct)).toBeLessThan(0.02); // lot rounding
     }
   });
 
@@ -155,7 +179,20 @@ describe('risk-based position sizing', () => {
   it('never sizes below the smallest unit when the account is under water', () => {
     seedStorage({ pairs: ['US100', 'XAU/USD'], defaultPair: 'XAU/USD', initialBalance: -5000 });
     expect(engine.accountEquity()).toBeLessThan(0);
-    expect(engine.riskLots(30)).toBe(0.01);
+    expect(engine.riskLots(30)).toBe(0.000001);
+  });
+
+  it('keeps a small account at its risk on a wide-pip instrument', () => {
+    // $126 at 2% risks $2.52. At the old 0.01-lot floor a 600-pip BTC stop
+    // lost $60 and its 2.5R target paid $150 — trades bigger than the account.
+    seedStorage({ pairs: ['US100', 'XAU/USD'], defaultPair: 'XAU/USD', initialBalance: 126, riskPerTrade: 2 });
+    const risk = engine.accountEquity() * 0.02; // ≈ $2.52 — earlier tests booked a little P&L
+    expect(risk).toBeLessThan(3);
+    for (const slPips of [25, 112, 600, 2400]) {
+      const loss = (engine.riskLots(slPips) / 0.1) * slPips;
+      expect(loss).toBeLessThanOrEqual(risk + 1e-9);
+      expect(loss).toBeGreaterThan(risk * 0.99);
+    }
   });
 
   it('caps what a paper-thin stop would otherwise demand', () => {
@@ -165,8 +202,8 @@ describe('risk-based position sizing', () => {
 
   it('treats a missing or nonsense stop as the smallest unit', () => {
     big();
-    expect(engine.riskLots(0)).toBe(0.01);
-    expect(engine.riskLots(undefined)).toBe(0.01);
+    expect(engine.riskLots(0)).toBe(0.000001);
+    expect(engine.riskLots(undefined)).toBe(0.000001);
   });
 });
 
@@ -375,5 +412,200 @@ describe('archive rows and hostile listeners', () => {
     expect(t.exitReason).toBe('Pair disabled');
     expect(t.pips).toBe(0);
     expect(engine.getTrades().filter((x) => x.status === 'open').length).toBe(0);
+  });
+});
+
+describe('trades are only managed on live prices', () => {
+  it('never closes a trade on the simulated walk', () => {
+    seedStorage({ pairs: ['US100', 'XAU/USD'], defaultPair: 'XAU/USD', initialBalance: 100000 });
+    engine.applyUniverse(['US100', 'XAU/USD']);
+    engine.setTvLive('XAU/USD', true);
+    const s = engine.getState('XAU/USD');
+    const t = engine.openTrade({ symbol: 'XAU/USD', side: 'BUY', slPips: 20, tpPips: 40 });
+    // Feed drops; the walk restarts far below the stop (as after a reload,
+    // where it starts from the catalog seed) and the time stop is long past.
+    engine.setTvLive('XAU/USD', false);
+    s.liveCandle.close = t.sl - 500 * s.pip;
+    engine.tickCount = t.openTick + 1000;
+    engine.tick();
+    expect(t.status).toBe('open');
+    engine.setTvLive('XAU/USD', true);
+    engine.closeTrade(t, t.entry, 'cleanup');
+  });
+
+  it('does not rescale a restored trade when the feed reprices the symbol', () => {
+    engine.markAllTv(false);
+    engine.loadTrades([
+      { id: 'T-950', symbol: 'XAU/USD', side: 'BUY', status: 'open', lots: 0.01, entry: 4100, sl: 4090, tp: 4145, openedAt: Date.now() },
+    ]);
+    const t = engine.getTrades().find((x) => x.id === 'T-950');
+    engine.applyTvTick('XAU/USD', { price: 4101 }); // the seed sits near 2384
+    expect(t.entry).toBe(4100);
+    expect(t.sl).toBe(4090);
+    expect(t.tp).toBe(4145);
+    engine.closeTrade(t, t.entry, 'cleanup');
+  });
+
+  it('closes a disabled pair flat when there is no live price', () => {
+    engine.applyUniverse(['US100', 'XAU/USD']);
+    engine.setTvLive('XAU/USD', true);
+    const t = engine.openTrade({ symbol: 'XAU/USD', side: 'BUY', slPips: 20, tpPips: 40 });
+    engine.setTvLive('XAU/USD', false);
+    engine.getState('XAU/USD').mid += 300;
+    engine.applyUniverse(['US100']);
+    expect(t.exitReason).toBe('Pair disabled');
+    expect(t.pnl).toBe(0);
+    engine.applyUniverse(['US100', 'XAU/USD']);
+    engine.markAllTv(true);
+  });
+});
+
+describe('account window', () => {
+  it('counts only trades closed since the account started', () => {
+    seedStorage({ pairs: ['US100', 'XAU/USD'], defaultPair: 'XAU/USD', initialBalance: 126 });
+    engine.trades = [];
+    engine.loadTrades([
+      { id: 'T-960', symbol: 'BTC/USD', side: 'BUY', status: 'closed', lots: 0.01, entry: 1, exit: 2, pips: 2030, pnl: 203, openedAt: 1000, closedAt: 2000 },
+      { id: 'T-961', symbol: 'XAU/USD', side: 'BUY', status: 'closed', lots: 0.001, entry: 1, exit: 2, pips: 50, pnl: 5, openedAt: 5000, closedAt: 6000 },
+    ]);
+    expect(engine.accountEquity()).toBe(334);
+    seedStorage({ pairs: ['US100', 'XAU/USD'], defaultPair: 'XAU/USD', initialBalance: 126, accountSince: 3000 });
+    expect(engine.accountEquity()).toBe(131);
+    expect(engine.tradeStats().closedCount).toBe(1);
+    expect(engine.getTrades()).toHaveLength(2); // history itself is untouched
+    engine.trades = [];
+  });
+});
+
+describe('reversal detection', () => {
+  const flat = (n) => Array.from({ length: n }, (_, i) => ({
+    time: i * 60, open: 100.4, high: 101, low: 100, close: 100.6,
+  }));
+
+  it('marks a swept high that closes back inside the range', () => {
+    const bars = [...flat(25), { time: 25 * 60, open: 100.8, high: 102, low: 100.1, close: 100.2 }, { time: 26 * 60, open: 100.2, high: 100.3, low: 100.1, close: 100.2 }];
+    const r = reversalAt(bars, 25);
+    expect(r).toMatchObject({ side: 'SHORT', kind: 'sweep', level: 101, extreme: 102 });
+    expect(findReversals(bars).map((x) => x.time)).toEqual([25 * 60]);
+    expect(latestReversal(bars, 100.3)?.side).toBe('SHORT');
+    expect(latestReversal(bars, 102.5)).toBeNull(); // price already ran through the sweep
+  });
+
+  it('marks a swept low that closes back inside the range', () => {
+    const bars = [...flat(25), { time: 25 * 60, open: 100.2, high: 100.9, low: 99, close: 100.8 }, { time: 26 * 60, open: 100.8, high: 100.9, low: 100.7, close: 100.8 }];
+    expect(reversalAt(bars, 25)).toMatchObject({ side: 'LONG', kind: 'sweep' });
+  });
+
+  it('ignores a breakout that holds beyond the range and the forming bar', () => {
+    const breakout = [...flat(25), { time: 25 * 60, open: 100.6, high: 102, low: 100.5, close: 101.9 }];
+    expect(reversalAt(breakout, 25)).toBeNull();
+    expect(findReversals([...flat(25), { time: 25 * 60, open: 100.8, high: 102, low: 100.1, close: 100.2 }])).toEqual([]);
+  });
+
+  it('marks RSI exhaustion broken by a close through the prior bar', () => {
+    const up = Array.from({ length: 30 }, (_, i) => ({
+      time: i * 60, open: 100 + i, high: 101.2 + i, low: 99.9 + i, close: 101 + i,
+    }));
+    const bar = { time: 30 * 60, open: 130, high: 130.1, low: 127.5, close: 128 }; // no new high: not a sweep
+    const r = reversalAt([...up, bar], 30);
+    expect(r).toMatchObject({ side: 'SHORT', kind: 'exhaustion' });
+    expect(r.rsi).toBeGreaterThanOrEqual(70);
+  });
+});
+
+describe('live higher timeframes', () => {
+  it('asks the feed for a timeframe once and folds live prices into it', async () => {
+    seedStorage({ pairs: ['US100', 'XAU/USD'], defaultPair: 'XAU/USD', initialBalance: 100000 });
+    engine.applyUniverse(['US100', 'XAU/USD']);
+    engine.markAllTv(true);
+    const s = engine.getState('XAU/USD');
+    const asked = [];
+    engine.historyAsked = new Map();
+    engine.historyLoader = async (sym, tf) => { asked.push(`${sym}:${tf}`); };
+    try {
+      expect(engine.liveCandles('XAU/USD', '1H')).toBeNull(); // walk only — not usable yet
+      engine.getCandles('XAU/USD', '1H');
+      await Promise.resolve();
+      expect(asked).toEqual(['XAU/USD:1H']); // throttled: one request, not one per call
+
+      const hour = 3600;
+      const t0 = Math.floor(Date.now() / 1000 / hour) * hour;
+      engine.applyTvHistory('XAU/USD', '1H', [
+        { time: t0 - hour, open: 4000, high: 4010, low: 3990, close: 4005 },
+        { time: t0, open: 4005, high: 4008, low: 4001, close: 4006 },
+      ]);
+      expect(engine.liveCandles('XAU/USD', '1H')).toHaveLength(2);
+      engine.applyTvHistory('XAU/USD', '1m', [{ time: t0 + 60, open: 4006, high: 4007, low: 4005, close: 4006 }]);
+      engine.applyTvCandle('XAU/USD', '1m', { time: t0 + 120, open: 4006, high: 4020, low: 4004, close: 4018 });
+      const bars = engine.getCandles('XAU/USD', '1H');
+      expect(bars).toHaveLength(2);
+      expect(bars[1]).toMatchObject({ high: 4020, close: 4018 });
+      engine.applyTvCandle('XAU/USD', '1m', { time: t0 + hour, open: 4018, high: 4019, low: 4015, close: 4016 });
+      expect(engine.getCandles('XAU/USD', '1H')).toHaveLength(3); // next hour opened
+      expect(s.liveTfs.has('1H')).toBe(true);
+    } finally {
+      engine.historyLoader = null;
+    }
+  });
+});
+
+describe('armed reversal strategies', () => {
+  it('trades a live reversal at the book\'s R:R and hold time, once per print', () => {
+    seedStorage({ pairs: ['US100', 'XAU/USD'], defaultPair: 'XAU/USD', initialBalance: 100000 });
+    engine.trades = [];
+    engine.strategyOpen = new Map();
+    engine.reversalSeen = new Map();
+    engine.markAllTv(true);
+    const s = engine.getState('XAU/USD');
+    const p = s.mid;
+    const step = 900;
+    const now = Math.floor(Date.now() / 1000 / step) * step;
+    const bars = [];
+    for (let i = 0; i < 30; i++) bars.push({ time: now - (31 - i) * step, open: p * 0.9998, high: p * 1.001, low: p * 0.998, close: p * 1.0002 });
+    bars.push({ time: now - step, open: p * 1.0008, high: p * 1.004, low: p * 0.9992, close: p * 0.9995 });
+    bars.push({ time: now, open: p * 0.9995, high: p * 0.9998, low: p * 0.9993, close: p * 0.9996 });
+    engine.applyTvHistory('XAU/USD', '15m', bars);
+    const book = {
+      id: 'st-rev', pair: 'XAU/USD', armed: true, directions: ['bull', 'bear'], timeframes: ['15m'],
+      entryRules: ['Sell the liquidity sweep of buy-side highs'],
+      riskRules: ['Stop beyond the sweep wick', 'TP at 1:4.5 risk to reward', 'Time-stop: exit after 6 hours'],
+    };
+    engine.syncStrategies([book]);
+    engine.checkStrategies(s);
+    const t = engine.getTrades().find((x) => x.strategyId === 'st-rev');
+    expect(t).toBeTruthy();
+    expect(t.side).toBe('SELL');
+    expect(t.sl).toBeGreaterThan(p * 1.004); // beyond the swept high
+    expect((t.entry - t.tp) / (t.sl - t.entry)).toBeCloseTo(4.5, 1);
+    expect(t.maxHoldMs).toBe(6 * 3600e3);
+
+    engine.closeTrade(t, t.entry, 'cleanup');
+    engine.syncStrategies([book]);
+    engine.checkStrategies(s);
+    expect(engine.getTrades().filter((x) => x.strategyId === 'st-rev')).toHaveLength(1); // same print, no re-entry
+    engine.syncStrategies([]);
+    engine.trades = [];
+  });
+});
+
+describe('momentum score', () => {
+  it('does not count a stretched RSI as trend strength', () => {
+    const s = engine.getState('XAU/USD');
+    const saved = s.candlesByTf.get('1m');
+    try {
+      // Straight up, then flat for 11 bars: RSI 100 with no momentum left.
+      const bars = Array.from({ length: 40 }, (_, i) => {
+        const c = 4000 + Math.min(i, 28) * 2;
+        return { time: i * 60, open: c - 1, high: c + 1, low: c - 2, close: c };
+      });
+      s.candlesByTf.set('1m', bars);
+      engine.refreshIndicators(s);
+      expect(s.rsi).toBeGreaterThanOrEqual(75);
+      expect(s.score).toBe(0);
+      expect(engine.getDetail({ ...s, detailTick: -1 }).reasons[0]).toContain('reversal risk');
+    } finally {
+      s.candlesByTf.set('1m', saved);
+      engine.refreshIndicators(s);
+    }
   });
 });

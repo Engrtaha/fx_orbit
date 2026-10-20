@@ -56,6 +56,11 @@ export async function fetchTvHistory(baseUrl, symbol, tf) {
   return body.candles.length;
 }
 
+// The engine asks for a timeframe's real bars the first time something needs
+// them (signal levels, reversal detection, armed strategies); the feed itself
+// only streams 1-minute bars.
+engine.historyLoader = (symbol, tf) => fetchTvHistory(loadSettings().tvBackendUrl, symbol, tf);
+
 function teardown() {
   clearTimeout(retryTimer);
   retryTimer = null;

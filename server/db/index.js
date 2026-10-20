@@ -3,22 +3,33 @@
 //   server/db/news.js         → every news/calendar item the desk has seen
 //   server/db/tradeHistory.js → every trade, open and closed
 //
-// Local setup (macOS / Homebrew), once:
-//   brew install postgresql@17
-//   brew services start postgresql@17
-//   createdb fxorbit
+// Local setup, once:
+//   macOS (Homebrew):  brew install postgresql@17 && brew services start postgresql@17
+//                      createdb fxorbit
+//   Debian / Ubuntu:   sudo -u postgres psql -c "CREATE ROLE $USER LOGIN"
+//                      sudo -u postgres psql -c "CREATE DATABASE fxorbit OWNER $USER"
 //
-// Connection string: DATABASE_URL, e.g. postgres://user@localhost:5432/fxorbit
-// (defaults to the current OS user on localhost, no password). The bridge stays
-// fully functional when Postgres is down — it just runs memory-only and retries
-// the connection on a backoff, so restarting the database needs no bridge restart.
+// Connection string: DATABASE_URL, e.g. postgres://user:pass@localhost:5432/fxorbit.
+// Without it the bridge connects as the current OS user, no password: through the
+// local Unix socket when there is one (Debian/Ubuntu authenticate that by OS user,
+// while their TCP localhost demands a password the bridge never has), else over
+// TCP localhost (Homebrew trusts it). The bridge stays fully functional when
+// Postgres is down — it just runs memory-only and retries the connection on a
+// backoff, so restarting the database needs no bridge restart.
 
+import fs from 'node:fs';
 import pg from 'pg';
 
 const { Pool } = pg;
 
+const PG_SOCKET_DIRS = ['/var/run/postgresql', '/tmp'];
+const socketDir = PG_SOCKET_DIRS.find((d) => fs.existsSync(`${d}/.s.PGSQL.5432`));
+const osUser = encodeURIComponent(process.env.USER || 'postgres');
+
 export const DATABASE_URL = process.env.DATABASE_URL
-  || `postgres://${encodeURIComponent(process.env.USER || 'postgres')}@localhost:5432/fxorbit`;
+  || (socketDir
+    ? `postgres://${osUser}@${encodeURIComponent(socketDir)}/fxorbit`
+    : `postgres://${osUser}@localhost:5432/fxorbit`);
 
 const RETRY_MS = 30_000;
 

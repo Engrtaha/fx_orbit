@@ -4,6 +4,62 @@ All notable changes to FxOrbit are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project is versioned by
 date and commit while it stays pre-1.0.
 
+## 2026-10-20 — Account sizing, strategy R:R, reversals, news direction, Ollama
+
+### Fixed
+
+- **Trades could be far bigger than the account.** Every position was floored at
+  0.01 lot ($0.10/pip): with $126 at 2% risk ($2.52) any stop wider than 25 pips
+  overrode the risk setting, so a BTC/USD volatility stop lost $50–80 and its target
+  paid ~$200. Lots are now fractional and rounded down, so a stop-out never costs more
+  than Risk Per Trade.
+- **Reloading the page inflated open trades.** The sim→live "rebase" multiplied trades
+  restored from the archive by live price / catalog seed (≈1.7× on gold), stretching
+  entry, stop, target and P&L. Removed — no trade is ever opened on a simulated price.
+- **Trades were closed on the random walk.** With the feed down (or before it
+  connected after a reload) TP/SL and Time Stop were judged against simulated prices.
+  The book now only acts on live prices; a disabled pair or a desk close with no live
+  price closes flat at entry.
+- **Account window.** Portfolio → Edit → *Start account from now* makes the balance,
+  best/worst trade and win rate count only trades closed after that moment. History
+  is never deleted.
+- **Signals ignored the strategy's R:R.** Targets were always 2.5R. The strategy's own
+  rules ("TP at 1:4.5", "4.5R", "R:R of 3") now set the target for signals, the engine
+  fallback and armed strategies; R:R displays as `1:4.5`.
+- **Reversal signals.** Liquidity sweeps of an established swing (closed back inside
+  the range) and first RSI-exhaustion breaks (≥75/≤25) are marked on the chart
+  (SWP / RSI arrows), badged on signals and used as the signal side for reversal-type
+  books (or with no book). Momentum alone used to call RSI 70 bullish.
+- **News direction was often inverted.** The subject is now what the headline names
+  first (codes, names like gold/yen/dollar/Fed, pairs, index names), not the feed's
+  USD-first currency list — "Gold falls as dollar strengthens" is bearish gold, not
+  bullish. Tone is read from the subject's own clause; unemployment/jobless claims
+  score inverted; a currency none of the enabled instruments carries is never traded
+  on the default pair; chips show the call for the traded pair; risk flags compare the
+  pair direction, not the raw tone. AI replies get the pair side derived from the
+  subject's tone. Server tagging uses word boundaries ("DECADE" is no longer CAD).
+- **Signals and stops ran on invented candles.** The feed streams 1-minute bars only;
+  every other timeframe was the seeded random walk unless the Charts page had loaded
+  it — including the 15m ATR that sizes every stop, the bars the signal model reads
+  and the reversal detector. Timeframes are now backfilled from the bridge on first
+  use and kept current by folding each live update into their running bar.
+- **The time stop fired after 3.6 minutes** (240 engine ticks), long before a 15m-sized
+  stop or a 1:4.5 target could be reached. It is now wall-clock: the strategy's own rule
+  ("exit after 4 hours"), the news plan's horizon, or 4 hours by default.
+- **Armed reversal strategies traded the EMA cross**, a trend signal. They now trade
+  live reversals on their own timeframe, once per print, at the book's R:R and hold time.
+- **RSI 88 scored as a high-confidence LONG.** A stretched RSI (≥75 / ≤25) no longer adds
+  trend points; the reversal detector decides whether it turned.
+- **Trade archive never connected on Linux.** The default connection used TCP localhost,
+  which Debian/Ubuntu Postgres protects with a password; it now uses the local socket
+  (OS-user auth) when present. Setup for Debian/Ubuntu is documented in `server/db`.
+- **`npm run dev` crashed with `ENOSPC`** when an editor held nearly all inotify
+  watches. Vite now watches only the browser sources, falls back to polling when watches
+  are short, and logs instead of crashing.
+- **Ollama.** A blank model fell back to `gpt-4o-mini` (404 on Ollama); the documented
+  `http://localhost:11434` (no `/v1`) 404'd; small models broke the JSON contract.
+  Now: provider-default model, `/v1` appended, JSON mode for Ollama, actionable error
+  messages, and Settings warns while AI changes are unsaved.
 ## 2026-10-20 — Database in Docker
 
 The project's PostgreSQL now runs containerized, seeded from a snapshot of the live

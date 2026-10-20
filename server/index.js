@@ -70,15 +70,46 @@ const AV_TOPIC_WEIGHT = { economy_monetary: 1, economy_fiscal: 0.8, economy_macr
 const AV_TIER1 = /\b(FED|FOMC|ECB|BOJ|BOE|SNB|RBA|central bank|interest rate|rate decision|CPI|PPI|inflation|payroll|unemployment|jobless|GDP|yield|treasur)\w*/i;
 const AV_FX_LINK = /\b(dollar|euro|yen|pound|franc|loonie|aud|nzd|usd|eur|jpy|gbp|gold|silver|sterling|gilt|currency|fx)\b/i;
 
+// Plain-English names for the codes. Multi-word names first, and each match is
+// masked, so "Canadian dollar" tags CAD without also tagging USD.
+const CCY_NAMES = [
+  ['CAD', /\b(?:canadian dollar|loonie|bank of canada)\b/gi],
+  ['AUD', /\b(?:australian dollar|aussie|reserve bank of australia|rba)\b/gi],
+  ['NZD', /\b(?:new zealand dollar|kiwi|rbnz)\b/gi],
+  ['CHF', /\b(?:swiss franc|franc|snb)\b/gi],
+  ['GBP', /\b(?:sterling|pound|bank of england|boe)\b/gi],
+  ['JPY', /\b(?:yen|bank of japan|boj)\b/gi],
+  ['EUR', /\b(?:euro area|eurozone|euro|ecb)\b/gi],
+  ['USD', /\b(?:dollar|greenback|federal reserve|fomc|fed)\b/gi],
+  ['XAU', /\b(?:gold|bullion)\b/gi],
+  ['XAG', /\bsilver\b/gi],
+];
+const CCY_ALT = CCYS.join('|');
+const CCY_PAIR_RE = new RegExp(`\\b(${CCY_ALT})\\/?(${CCY_ALT})\\b`, 'g'); // EUR/USD, EURUSD
+const CCY_CODE_RE = new RegExp(`\\b(${CCY_ALT})\\b`, 'g');
+
+// Currencies a headline touches, in the order the text first names them, so
+// the first entry is the story's subject. The old substring scan walked a fixed
+// USD-first list — "DECADE" tagged CAD, "EUROPEAN" EUR — and put USD first on
+// every headline that mentioned the dollar anywhere.
 function avCurrencies(feed) {
-  const out = new Set();
-  for (const t of feed.ticker_sentiment ?? []) {
-    const tk = String(t.ticker ?? '').toUpperCase();
-    for (const c of CCYS) if (tk === c || tk.includes(c)) out.add(c);
+  const hits = [];
+  let text = ` ${feed.title ?? ''} ${feed.summary ?? ''} `;
+  for (const [code, re] of CCY_NAMES) {
+    text = text.replace(re, (m, at) => { hits.push([at, code]); return ' '.repeat(m.length); });
   }
-  const text = `${feed.title ?? ''} ${feed.summary ?? ''}`.toUpperCase();
-  for (const c of CCYS) if (text.includes(c)) out.add(c);
-  return [...out];
+  text = text.replace(CCY_PAIR_RE, (m, a, b, at) => {
+    hits.push([at, a], [at + 1, b]);
+    return ' '.repeat(m.length);
+  });
+  for (const m of text.matchAll(CCY_CODE_RE)) hits.push([m.index, m[1]]);
+  const out = [...new Set(hits.sort((a, b) => a[0] - b[0]).map(([, c]) => c))];
+  for (const t of feed.ticker_sentiment ?? []) {
+    // Alpha Vantage tickers read FOREX:USD / FOREX:EURUSD.
+    const tk = String(t.ticker ?? '').toUpperCase().replace(/^FOREX:/, '');
+    for (const c of CCYS) if ((tk === c || (tk.length === 6 && tk.includes(c))) && !out.includes(c)) out.push(c);
+  }
+  return out;
 }
 
 function avItem(feed) {

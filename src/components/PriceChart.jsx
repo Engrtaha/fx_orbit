@@ -1,10 +1,10 @@
 import { useEffect, useRef, useState } from 'react';
 import {
-  createChart, CandlestickSeries, HistogramSeries, LineSeries, ColorType, CrosshairMode,
+  createChart, createSeriesMarkers, CandlestickSeries, HistogramSeries, LineSeries, ColorType, CrosshairMode,
 } from 'lightweight-charts';
 import { Activity, Timer } from 'lucide-react';
 import {
-  TIMEFRAMES, barCloseIn, engine, fmt, symbolMarketClosed, tfPeriodMs, volatilityPips,
+  TIMEFRAMES, barCloseIn, engine, findReversals, fmt, symbolMarketClosed, tfPeriodMs, volatilityPips,
 } from '../data/marketEngine';
 import { loadSettings } from '../data/settings';
 import { fetchTvHistory } from '../data/tvClient';
@@ -13,6 +13,16 @@ import { Badges, Delta } from './shared';
 
 const UP = 'rgba(45, 212, 167, 0.32)';
 const DOWN = 'rgba(251, 75, 106, 0.32)';
+
+// One arrow per reversal print on a closed bar: down-arrows above swept highs,
+// up-arrows below swept lows. "SWP" = liquidity sweep, "RSI" = RSI exhaustion.
+const reversalMarkers = (bars) => findReversals(bars).map((r) => ({
+  time: r.time,
+  position: r.side === 'SHORT' ? 'aboveBar' : 'belowBar',
+  shape: r.side === 'SHORT' ? 'arrowDown' : 'arrowUp',
+  color: r.side === 'SHORT' ? '#fb4b6a' : '#2dd4a7',
+  text: r.kind === 'sweep' ? 'SWP' : 'RSI',
+}));
 
 function emaSeries(candles, period) {
   const k = 2 / (period + 1);
@@ -76,6 +86,8 @@ export default function PriceChart({ pair, symbol, tf, onTfChange, signal }) {
   const volRef = useRef(null);
   const emaRef = useRef(null);
   const emaLastRef = useRef(null);
+  const markersRef = useRef(null);
+  const [reversals, setReversals] = useState(0);
   // The series holds the DISPLAYED timeframe's bars; streaming into it before
   // setData has run, or with a bar older than what it holds, makes
   // lightweight-charts throw. Both are tracked here.
@@ -155,6 +167,7 @@ export default function PriceChart({ pair, symbol, tf, onTfChange, signal }) {
 
     chartRef.current = chart;
     candleRef.current = candles;
+    markersRef.current = createSeriesMarkers(candles, []);
     volRef.current = volume;
     emaRef.current = ema;
     chartCapture.fn = () => chart.takeScreenshot().toDataURL('image/png');
@@ -200,6 +213,9 @@ export default function PriceChart({ pair, symbol, tf, onTfChange, signal }) {
       const ema = emaSeries(data, 20);
       emaLastRef.current = ema.length ? ema[ema.length - 1].value : null;
       emaRef.current.setData(ema);
+      const marks = reversalMarkers(data);
+      markersRef.current?.setMarkers(marks);
+      setReversals(marks.length);
       chartRef.current.timeScale().fitContent();
       lastBarTimeRef.current = data.length ? data[data.length - 1].time : 0;
       drawnRef.current = true;
@@ -218,6 +234,13 @@ export default function PriceChart({ pair, symbol, tf, onTfChange, signal }) {
       const bars = engine.getCandles(symbol, tf);
       const last = bars[bars.length - 1];
       if (!last || last.time < lastBarTimeRef.current) return;
+      // A new bar means the previous one just closed — the only moment a new
+      // reversal can print, so markers are rescanned then and not every tick.
+      if (last.time > lastBarTimeRef.current) {
+        const marks = reversalMarkers(bars);
+        markersRef.current?.setMarkers(marks);
+        setReversals(marks.length);
+      }
       lastBarTimeRef.current = last.time;
       candleRef.current?.update({
         time: last.time, open: last.open, high: last.high, low: last.low, close: last.close,
@@ -322,6 +345,7 @@ export default function PriceChart({ pair, symbol, tf, onTfChange, signal }) {
         }}>
           <Activity size={11} />
           {symbol} · {tf} · Volatility {fmt(volatilityPips(pair), 1)} pips
+          {' · '}{reversals ? `${reversals} reversal${reversals === 1 ? '' : 's'} marked (SWP sweep · RSI exhaustion)` : 'no reversals in view'}
         </div>
         {signal && (
           <div className="chart-sig" style={{ position: 'absolute', top: 28, left: 14, zIndex: 3, pointerEvents: 'none' }}>

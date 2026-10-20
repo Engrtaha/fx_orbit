@@ -86,6 +86,9 @@ const defaults = {
   riskPerTrade: 2,
   defaultPair: 'XAU/USD',
   initialBalance: 100,
+  // Epoch ms the current account starts at. Trades closed before it stay in
+  // history but no longer move the balance — 0 counts the whole book.
+  accountSince: 0,
   activeStrategy: '',
   activeStrategyData: null,
   activeStrategyId: '',
@@ -152,6 +155,12 @@ export function loadSettings() {
 // (TP/SL hits) moves the balance from it.
 export const accountBalance = (s, realizedPnl = 0) =>
   +(((Number(s?.initialBalance) || 0) + (Number(realizedPnl) || 0)).toFixed(2));
+
+// Whether a closed trade belongs to the current account. The archive keeps every
+// trade ever booked — including ones sized before risk-based sizing existed, when
+// a single stop-out could cost more than a $126 deposit — so the balance, the
+// best/worst trade and the win rate read only the trades since the anchor.
+export const inAccount = (t, s) => (Number(t?.closedAt) || 0) >= (Number(s?.accountSince) || 0);
 
 const listeners = new Set();
 

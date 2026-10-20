@@ -187,3 +187,28 @@ describe('attachmentContent', () => {
       .toEqual([{ type: 'text', text: 'Analyze this:' }]);
   });
 });
+
+describe('Ollama wiring', () => {
+  it('adds /v1 to the documented Ollama address and falls back to its own model', async () => {
+    const { chatEndpoint, aiModelOf, aiJsonMode } = await import('../src/utils/ai.js');
+    const o = { aiProvider: 'ollama', aiBaseUrl: 'http://localhost:11434', aiModel: '' };
+    expect(chatEndpoint(o)).toBe('http://localhost:11434/v1/chat/completions');
+    expect(chatEndpoint({ ...o, aiBaseUrl: 'http://localhost:11434/v1/' })).toBe('http://localhost:11434/v1/chat/completions');
+    expect(aiModelOf(o)).toBe('llama3.2:latest');
+    expect(aiModelOf({ ...o, aiModel: ' qwen3-vl:2b-instruct ' })).toBe('qwen3-vl:2b-instruct');
+    expect(aiJsonMode(o)).toEqual({ response_format: { type: 'json_object' } });
+    // An OpenAI-compatible server keeps its URL exactly and gets no json mode.
+    const c = { aiProvider: 'openai', aiBaseUrl: 'https://api.example.com', aiModel: '' };
+    expect(chatEndpoint(c)).toBe('https://api.example.com/chat/completions');
+    expect(aiModelOf(c)).toBe('gpt-4o-mini');
+    expect(aiJsonMode(c)).toEqual({});
+  });
+
+  it('turns a network failure into an actionable message', async () => {
+    const { aiErrorText } = await import('../src/utils/ai.js');
+    const o = { aiProvider: 'ollama', aiBaseUrl: 'http://localhost:11434', aiModel: 'llama3.2:latest' };
+    expect(aiErrorText(o, new TypeError('Failed to fetch'))).toContain('ollama serve');
+    expect(aiErrorText(o, new Error('HTTP 404'))).toContain('ollama pull llama3.2:latest');
+    expect(aiErrorText({ aiProvider: 'openai' }, new TypeError('Failed to fetch'))).toContain('not reachable');
+  });
+});

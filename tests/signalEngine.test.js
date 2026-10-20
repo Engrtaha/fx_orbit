@@ -185,3 +185,83 @@ describe('active signal lifecycle', () => {
     st.mid = entry; // restore so later ticks stay between levels
   });
 });
+
+describe('strategy reward:risk', () => {
+  it('reads the R:R a strategy writes in its own rules', async () => {
+    const { strategyRewardRisk, rrLabel } = await import('../src/utils/riskReward.js');
+    expect(strategyRewardRisk('Take profit at 1:4.5 risk to reward')).toBe(4.5);
+    expect(strategyRewardRisk('Target 4.5R from the sweep wick')).toBe(4.5);
+    expect(strategyRewardRisk('R:R 1:3 minimum')).toBe(3);
+    expect(strategyRewardRisk('Use a risk-reward ratio of 3')).toBe(3);
+    expect(strategyRewardRisk('Move SL to break-even at 1:1 R, final target 1:4.5')).toBe(4.5);
+    expect(strategyRewardRisk({ riskRules: ['Stop beyond the wick', 'TP 1 : 4.5'] })).toBe(4.5);
+    expect(strategyRewardRisk({ name: 'X', rules: 'Risk 0.5–1% of equity per trade; daily loss cap of 3%' })).toBeNull();
+    expect(strategyRewardRisk('Exit the target at 11:30 London time')).toBeNull();
+    expect(strategyRewardRisk('Take profit at 2.4× ATR(14)')).toBeNull();
+    expect(strategyRewardRisk('')).toBeNull();
+    expect(rrLabel(4.5)).toBe('1:4.5');
+    expect(rrLabel(2.5)).toBe('1:2.5');
+  });
+
+  it('sizes a model target from the strategy R:R, not the 2.5 default', () => {
+    const out = mod.normalizeSignal({ side: 'LONG', slPips: 20, tpPips: 50 }, makeState(), '15m', { rr: 4.5 });
+    expect(out.tpPips).toBeCloseTo(90, 1);
+    expect(out.rr).toBe(4.5);
+  });
+
+  it('builds the engine signal at the strategy R:R', async () => {
+    seedStorage({ pairs: ['US100', 'XAU/USD', 'EUR/USD'], defaultPair: 'US100' });
+    const plain = await mod.generateAiSignal('XAU/USD', '15m', null);
+    expect(plain.simulated).toBe(true);
+    if (plain.side !== 'WAIT') expect(plain.rr).toBeCloseTo(mod.DEFAULT_RR, 1);
+    const booked = await mod.generateAiSignal('XAU/USD', '15m', { name: 'Sweep', rules: 'TP at 1:4.5 risk to reward' });
+    if (booked.side !== 'WAIT') {
+      expect(booked.rr).toBeCloseTo(4.5, 2);
+      expect(booked.tpPips / booked.slPips).toBeCloseTo(4.5, 1);
+    }
+  });
+});
+
+describe('reversal signals', () => {
+  const plantSweep = (symbol, tf) => {
+    const s = engine.getState(symbol);
+    const bars = engine.getCandles(symbol, tf);
+    const p = s.mid;
+    const step = bars[1].time - bars[0].time;
+    const t0 = bars[bars.length - 1].time;
+    bars.length = 0;
+    // A quiet range, then a bar that runs the range high and closes back inside,
+    // then the bar now forming.
+    for (let i = 0; i < 30; i++) {
+      bars.push({ time: t0 - (31 - i) * step, open: p * 0.9998, high: p * 1.001, low: p * 0.998, close: p * 1.0002, volume: 100 });
+    }
+    bars.push({ time: t0 - step, open: p * 1.0008, high: p * 1.004, low: p * 0.9992, close: p * 0.9995, volume: 300 });
+    bars.push({ time: t0, open: p * 0.9995, high: p * 0.9998, low: p * 0.9993, close: p * 0.9996, volume: 50 });
+    return s;
+  };
+
+  it('signals SHORT on a swept high, with the stop beyond the sweep', async () => {
+    seedStorage({ pairs: ['US100', 'XAU/USD', 'EUR/USD'], defaultPair: 'US100' });
+    const s = plantSweep('XAU/USD', '5m');
+    s.score = 3; // momentum alone would say LONG — the reversal must win
+    const sig = await mod.generateAiSignal('XAU/USD', '5m', null);
+    expect(sig.side).toBe('SHORT');
+    expect(sig.reversal).toMatchObject({ side: 'SHORT', kind: 'sweep' });
+    expect(sig.sl).toBeGreaterThan(s.mid * 1.004); // beyond the swept extreme
+    expect(sig.tp).toBeLessThan(sig.entry);
+    expect(sig.reasons[0]).toContain('reversal');
+  });
+
+  it('lets a pure trend book keep its side but still reports the reversal', async () => {
+    const s = plantSweep('XAU/USD', '1H');
+    s.score = 3;
+    const sig = await mod.generateAiSignal('XAU/USD', '1H', { name: 'EMA trend', rules: 'Trade with the 21 EMA trend, buy pullbacks' });
+    expect(sig.reversal?.side).toBe('SHORT');
+    expect(sig.side).toBe(engine.getDetail(s).side);
+  });
+
+  it('keeps the reversal on the stored signal for the badge', () => {
+    const sig = mod.saveSignal({ ...sigResult('XAU/USD', 'SHORT', 2400, 20, 90), reversal: { side: 'SHORT', kind: 'sweep', label: 'x' } });
+    expect(sig.reversal).toMatchObject({ side: 'SHORT' });
+  });
+});

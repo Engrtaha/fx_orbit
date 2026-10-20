@@ -7,9 +7,11 @@ import { engine, fmt } from '../data/marketEngine';
 import { loadSettings, saveSettings } from '../data/settings';
 import {
   NEWS_CATEGORIES, NEWS_PROVIDERS, analyzeItem, closeNewsTrade, deskAnalysis, fetchNewsFeed, itemInUniverse,
-  itemTitle, newsTrades, placeNewsTrade, riskFlags, tradeLive, universeCurrencies,
+  itemTitle, newsTrades, placeNewsTrade, riskFlags, subjectLabel, tradeLive, universeCurrencies,
 } from '../data/newsEngine';
-import { downscale, readFile, parseJsonLoose, aiReady, aiChat, aiSupportsVision } from '../utils/ai';
+import {
+  downscale, readFile, parseJsonLoose, aiReady, aiChat, aiErrorText, aiSupportsVision,
+} from '../utils/ai';
 
 const SCREENSHOT_PROMPT = [
   'You are FxOrbit, a macro news-desk analyst inside a trading terminal.',
@@ -223,7 +225,7 @@ export default function NewsPage() {
         setShotResult(simulatedSnapshotRead(engine.getSnapshot()));
       }
     } catch (err) {
-      setShotError(err.message || 'Analysis failed. Check your AI model settings.');
+      setShotError(aiErrorText(s, err) || 'Analysis failed. Check your AI model settings.');
     } finally {
       setBusy(false);
     }
@@ -422,8 +424,18 @@ export default function NewsPage() {
                           </span>
                         </span>
                         <span className="nr-tail">
+                          {/* The chip is the call for the instrument the desk trades — the
+                              subject's own tone (bearish USD) is the opposite on XAU/USD. */}
                           {a?.loading ? <Activity size={13} className="spin" />
-                            : a && !a.error ? <span className={`trend-chip ${a.sentiment}`}>{a.sentiment.slice(0, 3).toUpperCase()}</span>
+                            : a && !a.error ? (
+                              <span
+                                className={`trend-chip ${a.read?.direction ?? a.sentiment}`}
+                                title={a.read?.symbol ? `${(a.read.direction ?? 'neutral').toUpperCase()} for ${a.read.symbol}` : undefined}
+                              >
+                                {(a.read?.direction ?? a.sentiment).slice(0, 3).toUpperCase()}
+                                {a.read?.symbol && a.read.direction !== 'neutral' ? ` ${a.read.symbol}` : ''}
+                              </span>
+                            )
                             : item.sentiment && item.sentiment !== 'neutral'
                               ? <span className="trend-chip prov">{item.sentiment.slice(0, 3).toUpperCase()}</span>
                               : null}
@@ -457,10 +469,18 @@ export default function NewsPage() {
                 <div className="ai-result">
                   <div className="ai-result-head">
                     <span className={`impact-chip ${a.impact}`}>{a.impact.toUpperCase()} IMPACT</span>
-                    <span className={`trend-chip ${a.sentiment}`}>{a.sentiment.toUpperCase()}</span>
+                    <span className={`trend-chip ${a.read?.direction ?? a.sentiment}`}>
+                      {(a.read?.direction ?? a.sentiment).toUpperCase()}{a.read?.symbol ? ` ${a.read.symbol}` : ''}
+                    </span>
+                    {subjectLabel(a.subject) && subjectLabel(a.subject) !== a.read?.symbol && (
+                      <span className="chip" title="The tone of the item for what it is about, before the pair mapping">
+                        {subjectLabel(a.subject)} {a.sentiment}
+                      </span>
+                    )}
                     {a.simulated && <span className="chip">simulated</span>}
                     {a.aiError && <span className="chip warn">AI fallback</span>}
                   </div>
+                  {a.aiError && <p className="ai-note">AI backend error — showing the desk heuristic. {a.aiError}</p>}
                   <div className="conf-row">
                     <span>Confidence</span>
                     <div className="conf-bar"><i style={{ width: `${a.confidence}%` }} /></div>
@@ -477,7 +497,8 @@ export default function NewsPage() {
                       {a.read?.symbol ? ` for ${a.read.symbol}` : ''}
                       {(a.read?.direction ?? a.sentiment) === 'neutral'
                         ? ' — no directional edge for this instrument on this item.'
-                        : ` — the desk expects ${a.read.symbol} to move ${a.read.direction === 'bullish' ? 'higher' : 'lower'} on this item.`}
+                        : ` — the desk expects ${a.read.symbol} to move ${a.read.direction === 'bullish' ? 'higher' : 'lower'} on this item`
+                          + `${subjectLabel(a.subject) && subjectLabel(a.subject) !== a.read.symbol ? ` (the item is ${a.sentiment} ${subjectLabel(a.subject)})` : ''}.`}
                     </p>
                   </div>
                   <div className="ai-block">

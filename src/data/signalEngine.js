@@ -3,13 +3,21 @@
 // provider configured the model reads the real stats; otherwise the terminal's
 // own engine math produces the same shape, so the page stays usable offline.
 
-import { engine, symbolMarketClosed, volatilityPips } from './marketEngine';
+import {
+  engine, latestReversal, reversalLabel, symbolMarketClosed, volatilityPips,
+} from './marketEngine';
 import { loadSettings } from './settings';
-import { parseJsonLoose, aiReady, aiAuthHeaders, chatEndpoint } from '../utils/ai';
+import {
+  parseJsonLoose, aiReady, aiAuthHeaders, aiErrorText, aiModelOf, aiJsonMode, chatEndpoint,
+} from '../utils/ai';
 import { fetchJson, AI_TIMEOUT_MS } from '../utils/http';
+import { isReversalBook, strategyRewardRisk } from '../utils/riskReward';
 
 const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
 const num = (v) => { const n = Number(v); return Number.isFinite(n) ? n : null; };
+
+// The engine's default target when neither the strategy nor the model names one.
+export const DEFAULT_RR = 2.5;
 
 const SIGNAL_SYSTEM = [
   'You are the signal engine of a trading terminal. You receive live stats for ONE instrument',
@@ -19,12 +27,22 @@ const SIGNAL_SYSTEM = [
   '{"side":"LONG|SHORT|WAIT","confidence":0-100,"slPips":12.5,"tpPips":22,',
   '"reasons":["max 3 short reasons citing the given stats"],"summary":"one sentence"}',
   'Rules: side LONG means buy, SHORT means sell. Use WAIT when the evidence conflicts or the spread/volatility makes the trade poor.',
-  'slPips/tpPips are in pips: scale the stop from volatilityPips (roughly 1-2x) and target at least 2.5x the stop. For indices 1 pip = 1 point.',
+  'slPips/tpPips are in pips: scale the stop from volatilityPips (roughly 1-2x). For indices 1 pip = 1 point.',
+  'When targetRewardRisk is given, tpPips MUST equal slPips x targetRewardRisk (the strategy\'s own R:R); otherwise target at least 2.5x the stop.',
+  'When instrument.reversal is present, a reversal printed on the last closed bars (a liquidity sweep rejected, or RSI exhaustion broken):',
+  'it is the primary setup — side SHORT for a bearish reversal, LONG for a bullish one — with the stop beyond reversal.extreme,',
+  'unless the strategy rules forbid counter-trend trades. An overbought RSI is NOT a reason to buy on its own.',
   'Confidence reflects how strongly the evidence supports the side; a WAIT signal gets low confidence.',
   'Never invent figures that are not derivable from the given stats.',
 ].join(' ');
 
-function signalContext(s, tf) {
+const strategyText = (strategy) => (typeof strategy === 'string' ? strategy : strategy?.rules ?? '');
+
+// A book that trades tops and bottoms — or no book at all — acts on a fresh
+// reversal. A pure trend-following book only hears about it as a reason.
+export const actsOnReversal = (strategy) => !strategyText(strategy) || isReversalBook(strategyText(strategy));
+
+function signalContext(s, tf, reversal) {
   const d = engine.getDetail(s);
   return {
     symbol: s.symbol,
@@ -38,6 +56,12 @@ function signalContext(s, tf) {
     volatilityPips: +volatilityPips(s).toFixed(1),
     atr: +d.atr.toFixed(s.decimals),
     pip: s.pip,
+    reversal: reversal ? {
+      side: reversal.side,
+      kind: reversal.kind,
+      level: +reversal.level.toFixed(s.decimals),
+      extreme: +reversal.extreme.toFixed(s.decimals),
+    } : null,
     recentBars: engine.getCandles(s.symbol, tf).slice(-10).map((c) => ({
       o: c.open, h: c.high, l: c.low, c: c.close,
     })),
@@ -49,8 +73,9 @@ async function callSignalModel(settings, payload) {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...aiAuthHeaders(settings) },
     body: JSON.stringify({
-      model: settings.aiModel || 'gpt-4o-mini',
+      model: aiModelOf(settings),
       temperature: 0.2,
+      ...aiJsonMode(settings),
       messages: [
         { role: 'system', content: SIGNAL_SYSTEM },
         { role: 'user', content: JSON.stringify(payload) },
@@ -63,8 +88,9 @@ async function callSignalModel(settings, payload) {
   return parsed;
 }
 
-// Clamp anything the model returns into an engine-valid signal.
-export function normalizeSignal(raw, s, tf) {
+// Clamp anything the model returns into an engine-valid signal. `rr` is the
+// strategy's own reward:risk — when set it decides the target, not the model.
+export function normalizeSignal(raw, s, tf, { rr = null } = {}) {
   const sideRaw = String(raw?.side ?? '').toUpperCase();
   const side = ['LONG', 'SHORT', 'WAIT'].includes(sideRaw)
     ? sideRaw
@@ -88,11 +114,16 @@ export function normalizeSignal(raw, s, tf) {
 
   const vol = Math.max(volatilityPips(s), s.spread * 2, 4);
   const slPips = clamp(num(raw?.slPips) ?? vol * 1.4, vol * 0.5, vol * 3.5);
-  const tpPips = clamp(num(raw?.tpPips) ?? slPips * 2.5, slPips * 2, slPips * 6);
+  const tpPips = rr
+    ? slPips * rr
+    : clamp(num(raw?.tpPips) ?? slPips * DEFAULT_RR, slPips * 2, slPips * 6);
+  return { ...base, ...levels(s, side, slPips, tpPips) };
+}
+
+function levels(s, side, slPips, tpPips) {
   const dir = side === 'LONG' ? 1 : -1;
   const entry = s.mid;
   return {
-    ...base,
     entry,
     slPips: +slPips.toFixed(1),
     tpPips: +tpPips.toFixed(1),
@@ -102,35 +133,71 @@ export function normalizeSignal(raw, s, tf) {
   };
 }
 
+// Engine-math signal: the momentum read, unless a fresh reversal printed and
+// the book trades reversals — then the reversal's side, with the stop parked
+// beyond the swept extreme instead of an arbitrary ATR distance.
+function engineSignal(s, tf, { rr, reversal }) {
+  const d = engine.getDetail(s);
+  const target = rr ?? DEFAULT_RR;
+  if (reversal) {
+    const beyond = reversal.side === 'SHORT' ? reversal.extreme - s.mid : s.mid - reversal.extreme;
+    const slDist = Math.max(beyond + 0.25 * d.atr, 0.5 * d.atr, s.spread * 2 * s.pip);
+    const slPips = slDist / s.pip;
+    return {
+      side: reversal.side,
+      ...levels(s, reversal.side, slPips, slPips * target),
+      reasons: [
+        `${reversalLabel(reversal)} at ${reversal.level.toFixed(s.decimals)}`,
+        ...d.reasons.slice(0, 3),
+      ],
+    };
+  }
+  const slPips = d.slPips;
+  return {
+    side: d.side,
+    ...levels(s, d.side === 'SHORT' ? 'SHORT' : 'LONG', slPips, slPips * target),
+    reasons: d.reasons.slice(0, 4),
+  };
+}
+
 export async function generateAiSignal(symbol, tf, strategy) {
   const s = engine.getState(symbol);
   if (!s) return null;
   const settings = loadSettings();
-  const d = engine.getDetail(s);
+  // Read real bars, not the walk: the signal's timeframe (its recent bars and
+  // reversal) and the 15m chart its stop distance comes from.
+  if (s.tv && engine.historyLoader) {
+    await Promise.all([...new Set([tf, '15m'])]
+      .filter((t) => t !== '1m' && !s.liveTfs?.has(t))
+      .map((t) => Promise.resolve(engine.historyLoader(symbol, t)).catch(() => null)));
+  }
+  const rr = strategyRewardRisk(strategyText(strategy));
+  const printed = latestReversal(engine.getCandles(symbol, tf), s.mid);
+  const reversal = printed && actsOnReversal(strategy) ? printed : null;
+  const eng = engineSignal(s, tf, { rr, reversal });
+  const tag = printed ? { side: printed.side, kind: printed.kind, label: reversalLabel(printed) } : null;
   const fallback = {
     symbol,
     tf,
-    side: d.side,
-    entry: d.entry,
-    sl: d.sl,
-    tp: d.tp,
-    rr: +d.rr.toFixed(2),
-    slPips: +d.slPips.toFixed(1),
-    tpPips: +d.tpPips.toFixed(1),
-    confidence: s.confidence,
-    reasons: d.reasons.slice(0, 4),
-    summary: 'Engine-derived signal from live RSI, momentum, spread and session liquidity.',
+    ...eng,
+    confidence: reversal ? Math.max(s.confidence, 62) : s.confidence,
+    summary: reversal
+      ? `${reversalLabel(reversal)} on the ${tf} chart — engine-derived levels with the stop beyond the swept extreme.`
+      : 'Engine-derived signal from live RSI, momentum, spread and session liquidity.',
     decimals: s.decimals,
+    reversal: tag,
     simulated: true,
   };
+  if (fallback.side === 'WAIT') Object.assign(fallback, { sl: null, tp: null, rr: null, slPips: null, tpPips: null });
   if (!aiReady(settings)) return fallback;
   try {
-    const payload = { instrument: signalContext(s, tf) };
+    const payload = { instrument: signalContext(s, tf, printed) };
     if (strategy) payload.strategy = strategy;
+    if (rr) payload.targetRewardRisk = rr;
     const raw = await callSignalModel(settings, payload);
-    return { ...normalizeSignal(raw, s, tf), simulated: false };
+    return { ...normalizeSignal(raw, s, tf, { rr }), reversal: tag, simulated: false };
   } catch (err) {
-    return { ...fallback, aiError: String(err?.message ?? err) };
+    return { ...fallback, aiError: aiErrorText(settings, err) };
   }
 }
 
@@ -216,6 +283,7 @@ export function saveSignal(result, mode = 'ai') {
     confidence: result.confidence,
     summary: result.summary ?? '',
     strategyRules: result.strategyRules ?? null,
+    reversal: result.reversal ?? null,
     mode,
     decimals: result.decimals,
     createdAt: Date.now(),

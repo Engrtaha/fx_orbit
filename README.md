@@ -22,6 +22,16 @@ If you are developing a production application, we recommend using TypeScript wi
 npm run dev     # Vite on :5173 + TradingView bridge on :5178
 ```
 
+First run after a clone: the bridge imports the bundled TradingView library from
+its compiled `dist/`, which is not committed — build it once:
+
+```bash
+(cd server/vendor/Tradingview-API && npm ci && npm run build)
+```
+
+Postgres needs credentials in `DATABASE_URL` (e.g. `postgres://user:pass@localhost:5432/fxorbit`)
+when the local server requires a password; without it the bridge runs memory-only.
+
 Run one dev stack at a time — both ports are fixed:
 
 - The browser talks to the bridge on `:5178` (Settings → TradingView backend URL must match). If a second `npm run dev` starts while that port is taken, the bridge now says so, stays idle and retries every 5s instead of crashing: under `concurrently -k` a dead bridge also kills Vite, which leaves the page half-rendered.
@@ -31,6 +41,15 @@ Run one dev stack at a time — both ports are fixed:
 - Postgres on `:5432` (db `fxorbit`) is optional; the bridge keeps serving without it and just skips persistence. A Dockerized copy of the same database runs on `:5433` — see [docker/README.md](docker/README.md).
 
 To see what holds a port: `lsof -nP -iTCP:5178 -sTCP:LISTEN`.
+
+File watching: Linux caps inotify watches per user, and a large editor workspace can
+hold nearly all of them (VS Code held ~54k of 65,536 here), which used to crash Vite
+with `ENOSPC`. Vite now watches only what the browser bundle is built from (not
+`server/`, `tests/` or `dist/`), switches to polling on its own when fewer than 2,000
+watches are free, and logs instead of crashing if it still hits the limit.
+`FXORBIT_POLL=1 npm run dev` forces polling and `FXORBIT_POLL=0` forbids it. The
+permanent fix is a higher limit: `sudo sysctl fs.inotify.max_user_watches=524288`
+(add `fs.inotify.max_user_watches=524288` to `/etc/sysctl.d/99-inotify.conf` to keep it).
 
 ## Database in Docker
 

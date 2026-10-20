@@ -4,8 +4,9 @@
 // levels so the terminal feels alive without an API key.
 
 import {
-  accountBalance, loadSettings, saveSettings, UNIVERSE, loadStrategies,
+  accountBalance, inAccount, loadSettings, saveSettings, UNIVERSE, loadStrategies,
 } from './settings';
+import { isReversalBook, strategyMaxHoldMs, strategyRewardRisk } from '../utils/riskReward';
 
 export const TIMEFRAMES = ['1m', '5m', '15m', '1H', '4H', '1D'];
 
@@ -15,11 +16,23 @@ const TF_MINUTES = { '1m': 1, '5m': 5, '15m': 15, '1H': 60, '4H': 240, '1D': 144
 // 0.1 lot therefore turned a 237-point US100 stop into a $237 loss on a $126
 // account; sizing off the stop instead makes every stop-out cost the user's
 // Risk Per Trade setting of equity, whatever the instrument is.
-const MIN_LOTS = 0.01;
+// The floor is fractional on purpose: at 0.01 lot ($0.10/pip) a $126 account
+// risking 2% ($2.52) was overridden by any stop wider than 25 pips, and a
+// BTC/USD volatility stop is several hundred — one trade lost $50–80 and one
+// target paid $200, the "best trade" of an account that should risk $2.52.
+const MIN_LOTS = 0.000001;
 const MAX_LOTS = 10;
 const PIP_VALUE_PER_LOT = 10;
 const EMA_FAST = 9;
 const EMA_SLOW = 21;
+
+// How long a position may sit before the time stop closes it, in wall-clock
+// time. It used to be 240 engine ticks — 3.6 minutes — so a stop sized from
+// 15-minute volatility with a 1:4.5 target was almost always closed long before
+// it could reach either level. A strategy's own rule ("exit after 4 hours")
+// overrides these per-source defaults.
+const HOLD_MS = { default: 4 * 3600e3 }; // 16 bars of the 15m chart the levels come from
+const HISTORY_RETRY_MS = 30_000;
 
 // Bars are bucketed on epoch-aligned boundaries (see genHistory), so the wall
 // clock alone says when the running candle closes: 4H bars at 00/04/08… UTC
@@ -179,6 +192,9 @@ class MarketEngine {
       rsi: 50, momentum: 0, score: 0, signal: 'NEUTRAL', confidence: 54,
       detailTick: -1, detail: null,
       tv: false,
+      // Timeframes whose bars came from the feed. Any other timeframe in
+      // candlesByTf is the seeded random walk (see getCandles).
+      liveTfs: new Set(),
     };
     const m1 = genHistory(def, 1, def.price);
     state.candlesByTf.set('1m', m1);
@@ -209,10 +225,11 @@ class MarketEngine {
       if (next.has(sym)) continue;
       // Exits are only checked for live states, so an open trade left behind here
       // could never hit its TP/SL or time stop. Close it at the last real price
-      // while its state — and therefore its pip size — is still available.
+      // while its state — and therefore its pip size — is still available. With
+      // no live price the walk's mark is fiction, so it closes flat at entry.
       const s = this.states.get(sym);
       for (const t of this.trades) {
-        if (t.status === 'open' && t.symbol === sym) this.closeTrade(t, s.mid, 'Pair disabled');
+        if (t.status === 'open' && t.symbol === sym) this.closeTrade(t, s.tv ? s.mid : t.entry, 'Pair disabled');
       }
       this.states.delete(sym);
     }
@@ -242,9 +259,13 @@ class MarketEngine {
     const back = closes[closes.length - 11] ?? closes[0];
     s.momentum = ((next - back) / back) * 100;
 
+    // RSI past 75 / under 25 is stretched, not strong: it used to add the full
+    // two trend points there, so RSI 88 read as a high-confidence LONG at
+    // exactly the spot a reversal is likeliest. A stretched reading now adds
+    // nothing; the reversal detector decides whether it actually turned.
     const score =
-      (s.rsi > 65 ? 2 : s.rsi > 55 ? 1 : 0) +
-      (s.rsi < 35 ? -2 : s.rsi < 45 ? -1 : 0) +
+      (s.rsi >= 75 ? 0 : s.rsi > 65 ? 2 : s.rsi > 55 ? 1 : 0) +
+      (s.rsi <= 25 ? 0 : s.rsi < 35 ? -2 : s.rsi < 45 ? -1 : 0) +
       (s.momentum > 0.05 ? 2 : s.momentum > 0.015 ? 1 : 0) +
       (s.momentum < -0.05 ? -2 : s.momentum < -0.015 ? -1 : 0);
     s.score = score;
@@ -305,12 +326,11 @@ class MarketEngine {
 
       this.refreshIndicators(s);
       this.derive(s);
-
-      if (this.bookOpenFor(s)) {
-        this.checkTradeExits(s);
-        this.maybeAutoTrade(s);
-        if (cadence) this.checkStrategies(s);
-      }
+      // No trade management here: this is the random walk, not a market. After a
+      // reload the walk starts at the catalog seed (BTC 81,470, gold 2,384), so
+      // a restored position was judged against a price thousands away — phantom
+      // TP/SL hits and Time Stops booked at a made-up mark. Open trades wait for
+      // the feed; openTrade() already refuses to open one without it.
     }
     this.emit();
   }
@@ -345,17 +365,59 @@ class MarketEngine {
     for (const s of this.states.values()) s.tv = live;
   }
 
-  // Sim → live transition for one symbol: rebase open trades by the price gap
-  // so the book stays continuous instead of instantly hitting stops or booking
-  // an absurd jump in P&L purely because the feed repriced the symbol.
-  enterLive(s, newMid) {
-    if (s.tv || !(newMid > 0) || !(s.mid > 0)) return;
-    const factor = newMid / s.mid;
-    for (const t of this.trades) {
-      if (t.status !== 'open' || t.symbol !== s.symbol) continue;
-      t.entry *= factor;
-      t.sl *= factor;
-      t.tp *= factor;
+  // There is deliberately no sim → live "rebase" of open trades. Every position
+  // is opened on a live price (openTrade refuses otherwise) and none is managed
+  // on the random walk, so a trade's levels are always real. The old rebase
+  // multiplied a trade restored from the archive by live/seed — on gold about
+  // 1.7× — stretching its entry, stop, target and therefore its P&L.
+
+  // ── Live higher timeframes ──────────────────────────────────────────────────
+  // The feed streams 1-minute bars only. Any other timeframe used to be the
+  // seeded random walk unless the Charts page happened to load it — and the
+  // 15m ATR that sizes every stop, the bars the signal model reads and the
+  // reversal detector all ran on those invented candles. A timeframe is now
+  // backfilled from the bridge on first use (tvClient installs the loader) and
+  // kept current by folding each live 1m update into its running bar.
+  requestHistory(symbol, tf) {
+    if (!this.historyLoader) return;
+    this.historyAsked ??= new Map();
+    const key = `${symbol}:${tf}`;
+    const at = this.historyAsked.get(key) ?? 0;
+    if (Date.now() - at < HISTORY_RETRY_MS) return;
+    this.historyAsked.set(key, Date.now());
+    Promise.resolve()
+      .then(() => this.historyLoader(symbol, tf))
+      .catch(() => { /* bridge busy or offline — retried after HISTORY_RETRY_MS */ });
+  }
+
+  // Real bars for a timeframe, or null while they are not loaded yet (the load
+  // is requested on the way). Only meaningful on a live symbol.
+  liveCandles(symbol, tf) {
+    const s = this.states.get(symbol);
+    if (!s?.tv) return null;
+    if (tf === '1m' || s.liveTfs.has(tf)) return s.candlesByTf.get(tf) ?? null;
+    this.requestHistory(symbol, tf);
+    return null;
+  }
+
+  // Roll a live price into every loaded higher timeframe's running bar, opening
+  // a new epoch-aligned bar when the period turns over.
+  foldLive(s, price, timeSec, high = price, low = price) {
+    for (const tf of s.liveTfs) {
+      if (tf === '1m') continue;
+      const arr = s.candlesByTf.get(tf);
+      const last = arr?.[arr.length - 1];
+      if (!last) continue;
+      const step = (TF_MINUTES[tf] ?? 1) * 60;
+      const bucket = timeSec - (timeSec % step);
+      if (bucket > last.time) {
+        arr.push({ time: bucket, open: last.close, high, low, close: price, volume: 0 });
+        if (arr.length > 320) arr.shift();
+      } else if (bucket === last.time) {
+        last.close = price;
+        if (high > last.high) last.high = high;
+        if (low < last.low) last.low = low;
+      }
     }
   }
 
@@ -379,10 +441,10 @@ class MarketEngine {
     }
     while (deduped.length > 320) deduped.shift();
     s.candlesByTf.set(tf, deduped);
+    s.liveTfs.add(tf);
     if (tf === '1m') {
       const prev = s.liveCandle?.close;
       const last = deduped[deduped.length - 1];
-      this.enterLive(s, last.close);
       s.dir = prev != null && last.close > prev ? 1 : last.close < prev ? -1 : 0;
       s.mid = last.close;
       // Re-anchor the day range to the real window; the seeded sim anchor
@@ -401,7 +463,6 @@ class MarketEngine {
   applyTvCandle(symbol, tf, candle) {
     const s = this.states.get(symbol);
     if (!s) return;
-    this.enterLive(s, +candle.close);
     const c = {
       time: Math.floor(candle.time),
       open: +candle.open,
@@ -429,6 +490,8 @@ class MarketEngine {
       this.scheduleEmit();
       return;
     }
+    s.liveTfs.add('1m');
+    this.foldLive(s, c.close, c.time, c.high, c.low);
     const prev = s.liveCandle?.close;
     s.dir = prev != null && c.close > prev ? 1 : c.close < prev ? -1 : 0;
     s.mid = c.close;
@@ -448,7 +511,6 @@ class MarketEngine {
   applyTvTick(symbol, tick) {
     const s = this.states.get(symbol);
     if (!s || tick.price == null) return;
-    this.enterLive(s, tick.price);
     const prev = s.mid;
     s.dir = tick.price > prev ? 1 : tick.price < prev ? -1 : 0;
     s.mid = tick.price;
@@ -464,6 +526,7 @@ class MarketEngine {
       if (tick.price < last.low) last.low = tick.price;
       if (tick.volume != null) last.volume = Math.round(tick.volume);
       s.liveCandle = last;
+      this.foldLive(s, tick.price, last.time);
     }
     if (tick.bid != null) s.bid = tick.bid;
     if (tick.ask != null) s.ask = tick.ask;
@@ -500,6 +563,9 @@ class MarketEngine {
   getCandles(symbol, tf) {
     const s = this.states.get(symbol);
     if (!s) return [];
+    // A live symbol asks for the real bars; the walk below only stands in until
+    // they arrive (applyTvHistory replaces it).
+    if (s.tv && !s.liveTfs.has(tf)) this.requestHistory(symbol, tf);
     if (!s.candlesByTf.has(tf)) {
       s.candlesByTf.set(tf, genHistory(s, TF_MINUTES[tf] ?? 1, s.mid));
     }
@@ -532,9 +598,11 @@ class MarketEngine {
     const tpPips = tpDist / s.pip;
 
     const reasons = [];
-    if (s.rsi >= 65) reasons.push(`RSI ${s.rsi.toFixed(0)} overbought — momentum stretched`);
+    if (s.rsi >= 75) reasons.push(`RSI ${s.rsi.toFixed(0)} overbought — stretched, reversal risk`);
+    else if (s.rsi >= 65) reasons.push(`RSI ${s.rsi.toFixed(0)} strong bullish momentum`);
     else if (s.rsi >= 55) reasons.push(`RSI ${s.rsi.toFixed(0)} bullish momentum`);
-    else if (s.rsi <= 35) reasons.push(`RSI ${s.rsi.toFixed(0)} oversold — downside pressure`);
+    else if (s.rsi <= 25) reasons.push(`RSI ${s.rsi.toFixed(0)} oversold — stretched, reversal risk`);
+    else if (s.rsi <= 35) reasons.push(`RSI ${s.rsi.toFixed(0)} strong bearish momentum`);
     else if (s.rsi <= 45) reasons.push(`RSI ${s.rsi.toFixed(0)} bearish momentum`);
     if (s.momentum >= 0.015) reasons.push(`1m momentum +${s.momentum.toFixed(3)}% rising`);
     else if (s.momentum <= -0.015) reasons.push(`1m momentum ${s.momentum.toFixed(3)}% falling`);
@@ -588,7 +656,7 @@ class MarketEngine {
     return incoming.length;
   }
 
-  openTrade({ symbol, side, source = 'Manual', strategyId = null, slPips, tpPips, note = null }) {
+  openTrade({ symbol, side, source = 'Manual', strategyId = null, slPips, tpPips, note = null, maxHoldMs = null }) {
     const s = this.states.get(symbol);
     if (!s) return null;
     // Without the bridge the engine is a random walk, and those fills would sit
@@ -603,21 +671,27 @@ class MarketEngine {
       symbol, side, lots: this.riskLots(slPips), entry, sl, tp,
       openedAt: Date.now(), openTick: this.tickCount,
       source, strategyId, status: 'open', note,
+      maxHoldMs: Number(maxHoldMs) > 0 ? Number(maxHoldMs) : null,
     };
     this.trades.unshift(trade);
     return trade;
   }
 
-  realizedPnl() {
-    return +this.trades.reduce(
-      (sum, t) => (t.status === 'closed' ? sum + (Number(t.pnl) || 0) : sum), 0,
-    ).toFixed(2);
+  // Closed trades that belong to the current account (see inAccount): history
+  // from before the account's start stays visible but stops moving the balance.
+  accountTrades(settings = loadSettings()) {
+    return this.trades.filter((t) => t.status === 'closed' && inAccount(t, settings));
+  }
+
+  realizedPnl(settings = loadSettings()) {
+    return +this.accountTrades(settings).reduce((sum, t) => sum + (Number(t.pnl) || 0), 0).toFixed(2);
   }
 
   // The same number Portfolio and Dashboard show: the user's anchor plus the
-  // realized P&L of closed trades.
+  // realized P&L of the account's closed trades.
   accountEquity() {
-    return accountBalance(loadSettings(), this.realizedPnl());
+    const settings = loadSettings();
+    return accountBalance(settings, this.realizedPnl(settings));
   }
 
   // Settings → "Risk Per Trade (%)" is the user's number; the clamp keeps a
@@ -633,7 +707,9 @@ class MarketEngine {
     const stop = Number(slPips);
     if (!Number.isFinite(stop) || stop <= 0) return MIN_LOTS;
     const lots = (this.accountEquity() * this.riskPct()) / (stop * PIP_VALUE_PER_LOT);
-    return Math.min(MAX_LOTS, Math.max(MIN_LOTS, +lots.toFixed(2)));
+    // Rounded DOWN: rounding to nearest sized some stops a couple of percent
+    // over the user's risk.
+    return Math.min(MAX_LOTS, Math.max(MIN_LOTS, Math.floor(lots * 1e6) / 1e6));
   }
 
   // Pip size for a symbol, straight from the universe catalog. The live state is
@@ -663,8 +739,22 @@ class MarketEngine {
       else if (dir > 0 && s.mid <= t.sl) this.closeTrade(t, t.sl, 'SL Hit');
       else if (dir < 0 && s.mid <= t.tp) this.closeTrade(t, t.tp, 'TP Hit');
       else if (dir < 0 && s.mid >= t.sl) this.closeTrade(t, t.sl, 'SL Hit');
-      else if (this.tickCount - t.openTick > 240) this.closeTrade(t, s.mid, 'Time Stop');
+      else if (Date.now() - (Number(t.openedAt) || Date.now()) > this.holdFor(t)) this.closeTrade(t, s.mid, 'Time Stop');
     }
+  }
+
+  // The trade's own hold time, else its strategy's rule, else the source default.
+  // A trade restored from the archive has no maxHoldMs column, so it falls
+  // back the same way — and keeps its real opening time, so one that overstayed
+  // while the app was closed is time-stopped at the first live price.
+  holdFor(t) {
+    if (Number(t.maxHoldMs) > 0) return Number(t.maxHoldMs);
+    if (t.strategyId) {
+      const st = this.strategies.find((x) => x.id === t.strategyId);
+      const ms = st ? strategyMaxHoldMs(st) : null;
+      if (ms) return ms;
+    }
+    return HOLD_MS.default;
   }
 
   maybeAutoTrade(s) {
@@ -712,32 +802,52 @@ class MarketEngine {
   // ordinary noise closed that trade within seconds.
   checkStrategies(s) {
     if (!this.strategies.length) return;
-    const m1 = s.candlesByTf.get('1m');
-    if (!m1) return;
-    const closes = m1.map((c) => c.close);
-    if (closes.length < 30) return;
+    const closes = (s.candlesByTf.get('1m') ?? []).map((c) => c.close);
     for (const st of this.strategies) {
       if (!st.armed) continue;
       if (st.pair !== s.symbol) continue;
       if (this.strategyOpen.has(`${st.id}:${s.symbol}`)) continue;
 
-      const fast = emaSeries(closes, EMA_FAST);
-      const slow = emaSeries(closes, EMA_SLOW);
-      const f0 = fast[fast.length - 2], f1 = fast[fast.length - 1];
-      const w0 = slow[slow.length - 2], w1 = slow[slow.length - 1];
       const dirs = st.directions ?? [];
       const wantLong = !dirs.length || dirs.includes('bull');
       const wantShort = !dirs.length || dirs.includes('bear');
-
+      const d = this.getDetail(s);
       let side = null;
-      if (f0 <= w0 && f1 > w1 && wantLong) side = 'BUY';
-      else if (f0 >= w0 && f1 < w1 && wantShort) side = 'SELL';
+      let slPips = Math.max(d.slPips, 3);
+
+      if (isReversalBook(st)) {
+        // A reversal book trades the reversal its rules describe — a swept swing
+        // rejected, or RSI exhaustion broken — on its own timeframe, with the
+        // stop beyond the swept extreme. An EMA cross is a trend signal and
+        // would trade it the wrong way round. Each print is traded once.
+        const tf = st.timeframes?.[0] ?? '15m';
+        const bars = this.liveCandles(s.symbol, tf);
+        const r = bars ? latestReversal(bars, s.mid) : null;
+        this.reversalSeen ??= new Map();
+        if (!r || this.reversalSeen.get(st.id) === r.time) continue;
+        this.reversalSeen.set(st.id, r.time);
+        if ((r.side === 'LONG' && !wantLong) || (r.side === 'SHORT' && !wantShort)) continue;
+        side = r.side === 'LONG' ? 'BUY' : 'SELL';
+        const beyond = r.side === 'SHORT' ? r.extreme - s.mid : s.mid - r.extreme;
+        slPips = Math.max((beyond + 0.25 * d.atr) / s.pip, (0.5 * d.atr) / s.pip, 3);
+      } else {
+        if (closes.length < 30) continue; // too little history for a meaningful cross
+        const fast = emaSeries(closes, EMA_FAST);
+        const slow = emaSeries(closes, EMA_SLOW);
+        const f0 = fast[fast.length - 2], f1 = fast[fast.length - 1];
+        const w0 = slow[slow.length - 2], w1 = slow[slow.length - 1];
+        if (f0 <= w0 && f1 > w1 && wantLong) side = 'BUY';
+        else if (f0 >= w0 && f1 < w1 && wantShort) side = 'SELL';
+      }
       if (!side) continue;
 
-      const d = this.getDetail(s);
+      // The book's own R:R ("TP at 1:4.5") sizes the target; the engine's 2.5
+      // is only the default for a book that names none.
+      const rr = strategyRewardRisk(st);
       const t = this.openTrade({
         symbol: s.symbol, side, source: 'Strategy', strategyId: st.id,
-        slPips: Math.max(d.slPips, 3), tpPips: Math.max(d.tpPips, 5),
+        slPips, tpPips: rr ? slPips * rr : Math.max(d.tpPips, 5),
+        maxHoldMs: strategyMaxHoldMs(st),
       });
       if (t) this.strategyOpen.set(`${st.id}:${s.symbol}`, t.id);
     }
@@ -748,7 +858,7 @@ class MarketEngine {
   }
 
   tradeStats() {
-    const closed = this.trades.filter((t) => t.status === 'closed');
+    const closed = this.accountTrades();
     const open = this.trades.filter((t) => t.status === 'open');
     const netPnl = closed.reduce((a, t) => a + t.pnl, 0);
     const wins = closed.filter((t) => t.pnl > 0);
@@ -772,3 +882,82 @@ export const volatilityPips = (s) => {
   if (!tail.length) return 0;
   return tail.reduce((acc, c) => acc + (c.high - c.low) / s.pip, 0) / tail.length;
 };
+
+// ── Reversal detection ───────────────────────────────────────────────────────
+// The engine's own score follows momentum — RSI 70 counts as bullish — so on
+// its own it can never call a top or a bottom. These are the two reversal
+// prints the desk reads off closed bars, shared by the chart markers and the
+// signal generator:
+//   sweep      — the bar runs an ESTABLISHED swing high (low) — the extreme of
+//                the prior N bars, set at least SWING_AGE bars ago and not exceeded
+//                since — then closes back inside the range in the lower (upper)
+//                half of its own bar: resting liquidity taken and rejected.
+//                Without the age rule every bar of a steady trend "swept" the
+//                bar before it and the chart was a wall of arrows.
+//   exhaustion — RSI was stretched (>= 75 / <= 25) into the bar and the bar is
+//                the FIRST to close through the previous bar's low (high).
+export const REVERSAL_LOOKBACK = 20;
+const SWING_AGE = 3;
+
+export function reversalAt(candles, i, lookback = REVERSAL_LOOKBACK) {
+  if (!Array.isArray(candles) || i < Math.max(lookback, 15) || i >= candles.length) return null;
+  const c = candles[i];
+  const range = c.high - c.low;
+  if (!(range > 0)) return null;
+  let hi = -Infinity;
+  let lo = Infinity;
+  for (let j = i - lookback; j <= i - SWING_AGE; j++) {
+    if (candles[j].high > hi) hi = candles[j].high;
+    if (candles[j].low < lo) lo = candles[j].low;
+  }
+  let recentHi = -Infinity;
+  let recentLo = Infinity;
+  for (let j = i - SWING_AGE + 1; j < i; j++) {
+    if (candles[j].high > recentHi) recentHi = candles[j].high;
+    if (candles[j].low < recentLo) recentLo = candles[j].low;
+  }
+  if (recentHi <= hi && c.high > hi && c.close < hi && (c.high - c.close) / range >= 0.5) {
+    return { side: 'SHORT', kind: 'sweep', time: c.time, level: hi, extreme: c.high };
+  }
+  if (recentLo >= lo && c.low < lo && c.close > lo && (c.close - c.low) / range >= 0.5) {
+    return { side: 'LONG', kind: 'sweep', time: c.time, level: lo, extreme: c.low };
+  }
+  const prev = candles[i - 1];
+  const prev2 = candles[i - 2];
+  const rsi = calcRsi(candles.slice(0, i).map((x) => x.close));
+  if (rsi >= 75 && c.close < prev.low && c.close < c.open && prev.close >= prev2.low) {
+    return { side: 'SHORT', kind: 'exhaustion', time: c.time, level: prev.low, extreme: Math.max(c.high, prev.high), rsi };
+  }
+  if (rsi <= 25 && c.close > prev.high && c.close > c.open && prev.close <= prev2.high) {
+    return { side: 'LONG', kind: 'exhaustion', time: c.time, level: prev.high, extreme: Math.min(c.low, prev.low), rsi };
+  }
+  return null;
+}
+
+// Every reversal on CLOSED bars — the last bar is still forming and can un-print
+// a sweep before it closes, so it is never marked.
+export function findReversals(candles, lookback = REVERSAL_LOOKBACK) {
+  const out = [];
+  for (let i = 0; i < (candles?.length ?? 0) - 1; i++) {
+    const r = reversalAt(candles, i, lookback);
+    if (r) out.push(r);
+  }
+  return out;
+}
+
+// The setup a signal may act on: a reversal on one of the last `within` closed
+// bars that price has not already invalidated by trading through its extreme.
+export function latestReversal(candles, price, within = 3) {
+  const n = candles?.length ?? 0;
+  for (let i = n - 2; i >= Math.max(0, n - 1 - within); i--) {
+    const r = reversalAt(candles, i);
+    if (!r) continue;
+    const intact = r.side === 'SHORT' ? price < r.extreme : price > r.extreme;
+    return intact ? r : null;
+  }
+  return null;
+}
+
+export const reversalLabel = (r) => (r
+  ? `${r.side === 'SHORT' ? 'Bearish' : 'Bullish'} ${r.kind === 'sweep' ? 'liquidity-sweep' : 'RSI-exhaustion'} reversal`
+  : '');

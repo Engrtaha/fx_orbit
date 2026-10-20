@@ -1,14 +1,19 @@
 import { useEffect, useState } from 'react';
-import { Pencil, Save, X, Check } from 'lucide-react';
+import { Pencil, Save, X, Check, RotateCcw } from 'lucide-react';
 import { engine, fmt } from '../data/marketEngine';
-import { loadSettings, saveSettings, subscribeSettings, accountBalance } from '../data/settings';
+import { loadSettings, saveSettings, subscribeSettings, accountBalance, inAccount } from '../data/settings';
 
 const money = (v) => `${v < 0 ? '-' : ''}$${Math.abs(v).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 const signed = (v) => `${v >= 0 ? '+' : ''}${money(v)}`;
 
-function computeStats() {
+const day = (ms) => new Date(ms).toISOString().slice(0, 10);
+
+function computeStats(settings = loadSettings()) {
   const trades = engine.getTrades();
-  const closed = trades.filter((t) => t.status === 'closed');
+  const allClosed = trades.filter((t) => t.status === 'closed');
+  // Only the current account's trades: older archive rows (sized before risk
+  // sizing, when one trade could out-size the deposit) stay in History.
+  const closed = allClosed.filter((t) => inAccount(t, settings));
   const open = trades.filter((t) => t.status === 'open');
   const wins = closed.filter((t) => t.pnl > 0);
   const losses = closed.filter((t) => t.pnl <= 0);
@@ -19,7 +24,7 @@ function computeStats() {
   let unrealized = 0;
   for (const t of open) {
     const s = engine.getState(t.symbol);
-    if (!s) continue;
+    if (!s?.tv) continue; // a simulated mark is not a price the trade could close at
     const dir = t.side === 'BUY' ? 1 : -1;
     unrealized += (((s.mid - t.entry) * dir) / s.pip) * (t.lots / 0.1);
   }
@@ -49,6 +54,7 @@ function computeStats() {
     recentClosed: closed.slice(0, 6),
     best,
     worst,
+    excluded: allClosed.length - closed.length,
   };
 }
 
@@ -79,7 +85,7 @@ export default function PortfolioPage() {
   const [toast, setToast] = useState(null);
 
   useEffect(() => engine.subscribe(() => setStats(computeStats())), []);
-  useEffect(() => subscribeSettings(setSettings), []);
+  useEffect(() => subscribeSettings((next) => { setSettings(next); setStats(computeStats(next)); }), []);
 
   const baseInitial = +settings.initialBalance;
   const previewInitial = editing ? Math.max(0, +draft.initialBalance || 0) : baseInitial;
@@ -97,6 +103,14 @@ export default function PortfolioPage() {
       defaultPair: settings.defaultPair,
     });
     setEditing(true);
+  };
+
+  // History is never deleted: starting fresh only moves the anchor, so trades
+  // closed before now stop counting toward the balance and stats.
+  const startFresh = () => {
+    saveSettings({ accountSince: Date.now() });
+    setToast('Account restarted — only trades closed from now count toward the balance');
+    setTimeout(() => setToast(null), 2600);
   };
 
   const saveAccount = () => {
@@ -125,7 +139,10 @@ export default function PortfolioPage() {
         <div className="pf-stat">
           <div className="k">Total P&amp;L</div>
           <div className={`v ${totalPnl >= 0 ? 'up' : 'dn'}`}>{signed(totalPnl)}</div>
-          <div className="d">{signed(stats.weekPnl)} this week · initial {money(previewInitial)}</div>
+          <div className="d">
+            {signed(stats.weekPnl)} this week · initial {money(previewInitial)}
+            {+settings.accountSince ? ` · since ${day(+settings.accountSince)}` : ''}
+          </div>
         </div>
         <div className="pf-stat">
           <div className="k">Win Rate</div>
@@ -167,8 +184,16 @@ export default function PortfolioPage() {
             {' '}{money(previewInitial)} + {signed(stats.netPnl)} = <b>{money(balance)}</b>.
             After saving it moves only as trades hit TP or SL.
           </p>
+          <p className="field-hint">
+            {+settings.accountSince
+              ? `Counting trades closed since ${day(+settings.accountSince)}`
+              : 'Counting every trade in the archive'}
+            {stats.excluded > 0 ? ` — ${stats.excluded} older trade${stats.excluded === 1 ? '' : 's'} kept in History but not counted.` : '.'}
+            {' '}Start fresh to measure this deposit only against trades you take from now on.
+          </p>
           <div className="btn-row">
             <button className="btn primary" onClick={saveAccount}><Save size={14} /> Save Changes</button>
+            <button className="btn ghost" onClick={startFresh}><RotateCcw size={14} /> Start account from now</button>
           </div>
         </section>
       )}

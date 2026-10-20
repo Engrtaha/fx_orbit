@@ -9,10 +9,44 @@ export const aiProviderOf = (s) => (s?.aiProvider && AI_PROVIDERS[s.aiProvider] 
 // receive a key nor be reached by a `javascript:`/`file:` payload.
 export function aiEndpoint(settings, path) {
   const fallback = AI_PROVIDERS[aiProviderOf(settings)].base;
-  const raw = String(settings?.aiBaseUrl || fallback).trim().replace(/\/+$/, '');
+  let raw = String(settings?.aiBaseUrl || fallback).trim().replace(/\/+$/, '');
   if (!/^https?:\/\/[^\s/]+(\/.*)?$/.test(raw)) throw new Error('AI base URL must start with http:// or https://');
+  // Ollama documents itself as http://localhost:11434, but its OpenAI-compatible
+  // routes live under /v1 — pasting the documented address made every call 404.
+  if (aiProviderOf(settings) === 'ollama' && /^https?:\/\/[^/]+$/.test(raw)) raw += '/v1';
   return `${raw}${path}`;
 }
+
+// The model every call sends. A blank field used to fall back to gpt-4o-mini on
+// every provider — on Ollama that is a model that does not exist, so each call
+// 404'd and the pages quietly showed their simulated engines instead.
+export const aiModelOf = (s) => String(s?.aiModel ?? '').trim() || AI_PROVIDERS[aiProviderOf(s)].model;
+
+// Ollama can constrain a reply to valid JSON. Small local models (Llama 3.2 3B)
+// otherwise wrap the object in prose or drop a brace often enough that the
+// parse fails and the desk falls back to its heuristic. Only sent to Ollama:
+// other OpenAI-compatible servers do not all accept response_format.
+// What a failed AI call means, in words the user can act on. The browser only
+// says "Failed to fetch" for a server that is down, not installed or blocking
+// the page — which on Ollama is almost always "it is not running".
+export function aiErrorText(settings, err) {
+  const msg = String(err?.message ?? err ?? 'unknown error');
+  const ollama = aiProviderOf(settings) === 'ollama';
+  let where = String(settings?.aiBaseUrl || AI_PROVIDERS[aiProviderOf(settings)].base);
+  try { where = aiEndpoint(settings, ''); } catch { /* invalid URL — the message says so */ }
+  if (/failed to fetch|networkerror|load failed|err_connection/i.test(msg)) {
+    return ollama
+      ? `Ollama is not reachable at ${where} — start it with "ollama serve" (install from ollama.com if it is not on this machine).`
+      : `The AI endpoint at ${where} is not reachable — check the base URL and your connection.`;
+  }
+  if (ollama && /404|not found/i.test(msg)) {
+    return `Ollama has no model "${aiModelOf(settings)}" — run: ollama pull ${aiModelOf(settings)}`;
+  }
+  if (/timed? ?out|abort/i.test(msg)) return `The model did not answer in time (${msg}).`;
+  return msg;
+}
+
+export const aiJsonMode = (s) => (aiProviderOf(s) === 'ollama' ? { response_format: { type: 'json_object' } } : {});
 
 export const chatEndpoint = (settings) => aiEndpoint(settings, '/chat/completions');
 export const modelsEndpoint = (settings) => aiEndpoint(settings, '/models');
@@ -189,11 +223,13 @@ export function attachmentContent(prompt, files, { vision = true } = {}) {
 
 // One OpenAI-compatible chat call for every flow in the app. Content parts may
 // be a string or the multimodal array built by attachmentContent().
-export async function aiChat(settings, messages, { temperature = 0.2 } = {}) {
+export async function aiChat(settings, messages, { temperature = 0.2, json = false } = {}) {
   const body = await fetchJson(chatEndpoint(settings), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...aiAuthHeaders(settings) },
-    body: JSON.stringify({ model: settings.aiModel || 'gpt-4o-mini', temperature, messages }),
+    body: JSON.stringify({
+      model: aiModelOf(settings), temperature, messages, ...(json ? aiJsonMode(settings) : {}),
+    }),
     timeoutMs: AI_TIMEOUT_MS,
   });
   return body.choices?.[0]?.message?.content ?? '';

@@ -1,12 +1,13 @@
 import { useEffect, useMemo, useState } from 'react';
 import {
-  Zap, ChevronDown, ArrowDownRight, ArrowUpRight, Loader2, Minus, Radio, History, Moon, Clock, Bitcoin,
+  Zap, ChevronDown, ArrowDownRight, ArrowUpRight, Loader2, Minus, Radio, History, Moon, Clock, Bitcoin, RotateCcw,
 } from 'lucide-react';
 import {
   engine, fmt, marketClosed, symbolMarketClosed, reopenLabel, TIMEFRAMES,
 } from '../data/marketEngine';
 import { loadSettings } from '../data/settings';
 import { allowedTimeframes, bookDirections, timeframeLabel } from '../data/strategyBook';
+import { rrLabel, strategyRewardRisk } from '../utils/riskReward';
 import {
   generateAiSignal, saveSignal, activeSignals, recentOutcomes, subscribeSignals, signalProgress,
 } from '../data/signalEngine';
@@ -43,6 +44,7 @@ export default function SignalsPage() {
   const outcomes = recentOutcomes(6);
 
   const strategyName = settings.activeStrategy || 'AI Best';
+  const bookRr = mode === 'my' ? strategyRewardRisk(settings.activeStrategyData) : null;
   const subtitleStrategy = mode === 'my' ? strategyName : 'AI Best Strategy';
 
   // A strategy that names its own timeframes limits where its signals may be
@@ -150,6 +152,15 @@ export default function SignalsPage() {
           <ChevronDown size={16} className="sig-caret" />
         </div>
 
+        {bookRr && (
+          <p className="sig-tf-note">
+            <Zap size={13} />
+            <span>
+              Targets follow <b>{strategyName}</b>&apos;s own risk:reward of <b>{rrLabel(bookRr)}</b>.
+            </span>
+          </p>
+        )}
+
         {tfLocked && (
           <p className="sig-tf-note">
             <Clock size={13} />
@@ -228,8 +239,13 @@ export default function SignalsPage() {
                 </span>
                 <b className="sig-row-sym">{sig.symbol}</b>
                 <span className="panel-sub">
-                  {sig.tf} · {sig.mode === 'my' ? 'my strategy' : 'AI best'} · R:R {sig.rr}
+                  {sig.tf} · {sig.mode === 'my' ? 'my strategy' : 'AI best'} · R:R {rrLabel(sig.rr)}
                 </span>
+                {sig.reversal && (
+                  <span className={`rev-chip ${sig.reversal.side === 'LONG' ? 'up' : 'dn'}`} title={sig.reversal.label}>
+                    <RotateCcw size={10} /> Reversal
+                  </span>
+                )}
                 <span className={`num ${prog.pips >= 0 ? 'up' : 'down'}`} style={{ marginLeft: 'auto' }}>
                   {prog.pips >= 0 ? '+' : ''}{prog.pips} pips
                 </span>
@@ -305,7 +321,12 @@ export default function SignalsPage() {
               <div className="conf-bar"><i style={{ width: `${result.confidence}%` }} /></div>
               <b>{result.confidence}%</b>
             </div>
-            {result.rr != null && <div className="ot-rr">R : R <b>{result.rr.toFixed(2)}</b></div>}
+            {result.rr != null && <div className="ot-rr">R : R <b>{rrLabel(result.rr)}</b></div>}
+            {result.reversal && (
+              <div className={`rev-chip ${result.reversal.side === 'LONG' ? 'up' : 'dn'}`}>
+                <RotateCcw size={11} /> {result.reversal.label}
+              </div>
+            )}
             <div className="reason-chips">
               {result.reasons.slice(0, 3).map((r) => <span key={r} className="chip">{r}</span>)}
             </div>
