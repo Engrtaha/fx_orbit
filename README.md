@@ -32,6 +32,16 @@ its compiled `dist/`, which is not committed — build it once:
 Postgres needs credentials in `DATABASE_URL` (e.g. `postgres://user:pass@localhost:5432/fxorbit`)
 when the local server requires a password; without it the bridge runs memory-only.
 
+The database this project runs against locally (Homebrew `postgresql@17`, Unix-socket auth, no
+password) resolves to:
+
+```bash
+DATABASE_URL=postgres://tahabangash@%2Ftmp/fxorbit   # db fxorbit over /tmp/.s.PGSQL.5432
+```
+
+`%2Ftmp` is `/tmp` URL-encoded — the socket directory [server/db/index.js](server/db/index.js)
+probes before falling back to TCP `localhost:5432`. Export `DATABASE_URL` to override that.
+
 Run one dev stack at a time — both ports are fixed:
 
 - The browser talks to the bridge on `:5178` (Settings → TradingView backend URL must match). If a second `npm run dev` starts while that port is taken, the bridge now says so, stays idle and retries every 5s instead of crashing: under `concurrently -k` a dead bridge also kills Vite, which leaves the page half-rendered.
