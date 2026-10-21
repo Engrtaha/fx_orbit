@@ -3,7 +3,7 @@
 The project's PostgreSQL, containerized. `docker-compose.yml` (repo root) runs
 PostgreSQL 17 as the container `fxorbit-db`, seeded on first boot from
 [`init/01-fxorbit.sql`](init/01-fxorbit.sql) — a snapshot of the live `fxorbit`
-database taken 2026-10-20 (123 trades, 765 news items).
+database taken 2026-10-21 (123 trades, 852 news items).
 
 ## Run it
 
