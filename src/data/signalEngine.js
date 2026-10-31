@@ -11,6 +11,7 @@ import {
   parseJsonLoose, aiReady, aiAuthHeaders, aiErrorText, aiModelOf, aiJsonMode, chatEndpoint,
 } from '../utils/ai';
 import { fetchJson, AI_TIMEOUT_MS } from '../utils/http';
+import { notifyNewSignal } from './telegram';
 import {
   SETUPS, isReversalBook, strategyMaxHoldMs, strategyRewardRisk,
 } from '../utils/riskReward';
@@ -305,6 +306,9 @@ export function saveSignal(result, mode = 'ai') {
   sig.expiresAt = sig.createdAt + signalLifetimeMs(sig);
   state().active = [...state().active.filter((s) => s.symbol !== sig.symbol), sig];
   emit();
+  // Every new signal passes through here — the generate button and every
+  // regenerated one — so the Telegram alert hangs off this single point.
+  void notifyNewSignal(sig);
   return sig;
 }
 

@@ -85,6 +85,17 @@ describe('pages render against seeded state', () => {
     expect(t).toContain('Reversal · R:R 1:4.5 · hold 6h');
   });
 
+  it('Telegram Bot shows the wiring form and the alert that would be sent', async () => {
+    const t = text(await render('/telegram', 'TelegramPage'));
+    expect(t).toContain('Bot token');
+    expect(t).toContain('Chat ID');
+    expect(t).toContain('Notify me when a new signal appears on Trade Signals');
+    expect(t).toContain('FxOrbit signal — XAU/USD SHORT'); // seeded live signal, not the sample
+    expect(t).toContain('R:R 1:4.5');
+    expect(t).toContain('Send test message');
+    expect(t).toContain('Alerts stay off'); // nothing saved yet
+  });
+
   it('Charts, News, Sessions and Settings draw without throwing', async () => {
     expect(text(await render('/charts', 'ChartsPage'))).toContain('XAU/USD');
     expect(text(await render('/news', 'NewsPage'))).toContain('Analyze a news screenshot');

@@ -14,6 +14,7 @@ const NewsPage = lazy(() => import('./pages/NewsPage'));
 const StrategiesPage = lazy(() => import('./pages/StrategiesPage'));
 const PortfolioPage = lazy(() => import('./pages/PortfolioPage'));
 const SessionsPage = lazy(() => import('./pages/SessionsPage'));
+const TelegramPage = lazy(() => import('./pages/TelegramPage'));
 const SettingsPage = lazy(() => import('./pages/SettingsPage'));
 import { engine } from './data/marketEngine';
 import { loadSettings, subscribeSettings } from './data/settings';
@@ -31,6 +32,7 @@ const TITLES = {
   '/strategies': { eyebrow: 'Systems', title: 'Trading Strategy' },
   '/portfolio': { eyebrow: 'Account', title: 'Portfolio' },
   '/sessions': { eyebrow: 'Market Hours', title: 'Trading Sessions' },
+  '/telegram': { eyebrow: 'Notifications', title: 'Telegram Bot' },
   '/settings': { eyebrow: 'Configuration', title: 'Settings' },
 };
 
@@ -102,6 +104,7 @@ function Layout() {
             <Route path="/strategies" element={<StrategiesPage />} />
             <Route path="/portfolio" element={<PortfolioPage />} />
             <Route path="/sessions" element={<SessionsPage />} />
+            <Route path="/telegram" element={<TelegramPage />} />
             <Route path="/settings" element={<SettingsPage />} />
           </Routes>
           </Suspense>

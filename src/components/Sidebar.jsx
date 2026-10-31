@@ -1,6 +1,6 @@
 import { NavLink } from 'react-router-dom';
 import {
-  LayoutDashboard, Zap, LineChart, Newspaper, Clock, History, Wallet, Brain, Settings,
+  LayoutDashboard, Zap, LineChart, Newspaper, Clock, History, Wallet, Brain, Send, Settings,
 } from 'lucide-react';
 
 const NAV = [
@@ -12,6 +12,7 @@ const NAV = [
   { icon: History, label: 'History', to: '/history' },
   { icon: Wallet, label: 'Portfolio', to: '/portfolio' },
   { icon: Brain, label: 'Strategies', to: '/strategies' },
+  { icon: Send, label: 'Telegram Bot', to: '/telegram' },
 ];
 
 export default function Sidebar() {

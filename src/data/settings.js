@@ -110,6 +110,12 @@ const defaults = {
   aiApiKey: '',
   aiModel: 'gpt-4o-mini',
   aiBaseUrl: 'https://api.openai.com/v1',
+  // Telegram trade alerts. The token is the user's own (BotFather) and, like
+  // the AI key, is only ever sent to its own service from this browser.
+  telegramEnabled: false,
+  telegramToken: '',
+  telegramChatId: '',
+  telegramNotifySignals: true,
   pairs: [...DEFAULT_ENABLED],
   autoTrade: [],
 };
